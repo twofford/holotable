@@ -1,0 +1,27 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0d0f14;
+  color: #e6e8ee;
+}
+body { margin: 0; }
+.app { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
+header { display: flex; align-items: center; gap: 12px; }
+h1 { margin: 0; font-size: 28px; letter-spacing: 0.02em; }
+h2 { margin-top: 0; font-size: 16px; }
+.status { padding: 4px 10px; border-radius: 999px; font-size: 13px; background: #2a2e38; }
+.status-open { background: #12432f; color: #7ef0b5; }
+.status-connecting { background: #4a3b10; color: #ffd36b; }
+.status-closed { background: #4a1620; color: #ff8a9a; }
+.panel { margin-top: 16px; padding: 16px; border-radius: 12px; background: #161a22; }
+button {
+  min-height: 44px; min-width: 44px; padding: 0 18px; border: 0; border-radius: 10px;
+  background: #00b3c7; color: #031216; font-size: 16px; font-weight: 600;
+}
+button:disabled { opacity: 0.4; }
+.hint { color: #8a90a0; font-size: 14px; }
+.log { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow: auto; }
+.log li { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid #222734; }
+.log code { font-size: 13px; word-break: break-all; }
+.log-in .arrow { color: #7ef0b5; }
+.log-out .arrow { color: #00b3c7; }

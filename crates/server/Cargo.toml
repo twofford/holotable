@@ -1,0 +1,22 @@
+[package]
+name = "holotable-server"
+description = "Holotable HTTP and WebSocket server."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "holotable"
+path = "src/main.rs"
+
+[dependencies]
+holotable-core = { path = "../core" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json.workspace = true
+
+[lints]
+workspace = true

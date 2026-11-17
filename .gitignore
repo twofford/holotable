@@ -1,0 +1,7 @@
+/target
+node_modules/
+/client/dist
+.DS_Store
+*.db
+*.db-*
+/data

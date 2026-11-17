@@ -1,0 +1,16 @@
+[package]
+name = "holotable-core"
+description = "Shared logic for Holotable: protocol types, geometry, UVTT parsing, dice. Builds for native and WASM."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

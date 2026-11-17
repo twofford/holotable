@@ -1,0 +1,11 @@
+[package]
+name = "rules2069"
+description = "New York 2069 rules for Holotable: checks, Tension pool, and later Heat and hacking."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
