@@ -15,12 +15,37 @@ use ts_rs::TS;
 
 use crate::{
     campaign::Role,
-    scene::{RejectCode, SceneEvent, SceneOp, Token},
+    scene::{DoorState, RejectCode, SceneEvent, SceneOp, Token},
 };
 
 /// Where `cargo test` writes the generated TypeScript. ts-rs resolves this
 /// against `crates/core/bindings/`, so it climbs three levels to the repo root.
 const EXPORT_DIR: &str = "../../../client/src/protocol/generated/";
+
+/// A player's explored fog: one bit per cell, row by row, base64-encoded.
+/// The layout comes from `vision::ExploredLayout::for_map`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = EXPORT_DIR)]
+pub struct Explored {
+    /// Cell side in image pixels.
+    pub cell: f64,
+    pub cols: u32,
+    pub rows: u32,
+    pub bits: String,
+}
+
+impl Explored {
+    pub fn new(layout: crate::vision::ExploredLayout, bits: &[u8]) -> Self {
+        use base64::Engine;
+        Self {
+            cell: layout.cell,
+            cols: layout.cols,
+            rows: layout.rows,
+            bits: base64::engine::general_purpose::STANDARD.encode(bits),
+        }
+    }
+}
 
 /// Where a client left off in a scene, so it can catch up after a reconnect
 /// instead of reloading everything (spec SYN-007).
@@ -103,7 +128,15 @@ pub enum ServerMsg {
         seq: u64,
         /// Your role in the scene's campaign.
         role: Role,
+        /// The tokens you may see: all of them for a GM; for a player, only
+        /// what their tokens can see (VIS-008).
         tokens: Vec<Token>,
+        /// Every door, by its index in the map's `portals`.
+        doors: Vec<DoorState>,
+        /// For players: what they've explored on this scene (VIS-005).
+        #[serde(default)]
+        #[ts(optional)]
+        explored: Option<Explored>,
     },
     /// Something changed. Sequence numbers increase; a client may see gaps,
     /// because events it isn't allowed to see are left out.

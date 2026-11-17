@@ -3,4 +3,4 @@
 /**
  * The settings of a token that a GM can edit (everything except position).
  */
-export type TokenSettings = { name: string, assetId: number | null, size: number, ownerId: number | null, hidden: boolean, };
+export type TokenSettings = { name: string, assetId: number | null, size: number, ownerId: number | null, hidden: boolean, vision: boolean, visionRange: number | null, };

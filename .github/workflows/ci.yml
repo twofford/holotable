@@ -18,8 +18,8 @@ jobs:
       - run: cargo test --workspace
       - name: Generated TypeScript types are up to date
         run: git diff --exit-code -- client/src/protocol/generated
-      - name: Core builds for WebAssembly
-        run: cargo build -p holotable-core --target wasm32-unknown-unknown
+      - name: Vision code builds for WebAssembly
+        run: cargo build -p holotable-wasm --target wasm32-unknown-unknown
 
   client:
     runs-on: ubuntu-latest
@@ -33,6 +33,11 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: client/package-lock.json
+      # `npm run typecheck` and `npm run build` first build crates/wasm to
+      # WebAssembly (scripts/build-wasm.sh), which needs Rust and wasm-bindgen.
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install wasm-bindgen-cli --version 0.2.130 --locked
       - run: npm ci
       - run: npm run typecheck
       - run: npm test

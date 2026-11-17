@@ -36,13 +36,14 @@ class FakeLink implements SceneLink {
   }
 }
 
-const vex: Token = { id: 7, name: "Vex", assetId: null, x: 1, y: 1, size: 1, ownerId: 2, hidden: false };
+const vex: Token = { id: 7, name: "Vex", assetId: null, x: 1, y: 1, size: 1, ownerId: 2, hidden: false, vision: true, visionRange: null };
 
 function setup() {
   const link = new FakeLink();
   const store = new SceneStore(link, 3);
   store.start();
-  link.deliver({ type: "sceneSnapshot", sceneId: 3, epoch: "e1", seq: 5, role: "player", tokens: [vex] });
+  link.deliver({ type: "sceneSnapshot", sceneId: 3, epoch: "e1", seq: 5, role: "player", tokens: [vex],
+    doors: [{ open: false, locked: false }], explored: { cell: 10, cols: 8, rows: 2, bits: "/wA=" } });
   return { link, store };
 }
 
@@ -111,5 +112,16 @@ describe("SceneStore", () => {
     expect(link.sent[0]).toEqual({ type: "joinScene", sceneId: 3, resume: undefined });
     link.deliver({ type: "kicked", reason: "Removed.", rejoin: false });
     expect(store.getSnapshot().status).toBe("kicked");
+  });
+
+  it("tracks doors and explored fog", () => {
+    const { link, store } = setup();
+    expect(Array.from(store.getSnapshot().explored!.bits)).toEqual([255, 0]);
+    link.deliver({ type: "event", seq: 6, event: { type: "doorChanged", door: 0, open: true, locked: true } });
+    expect(store.getSnapshot().doors[0]).toEqual({ open: true, locked: true });
+    link.deliver({ type: "event", seq: 7, event: { type: "exploredReset" } });
+    expect(Array.from(store.getSnapshot().explored!.bits)).toEqual([0, 0]);
+    store.setDoor(0, false);
+    expect(link.sent.at(-1)).toMatchObject({ type: "op", op: { type: "setDoor", door: 0, open: false } });
   });
 });

@@ -1,4 +1,5 @@
-//! The rules for changing a scene's tokens (milestone M4), as pure functions.
+//! The rules for changing a scene (tokens in M4; doors and vision in M5), as
+//! pure functions.
 //!
 //! The server's scene room calls `plan` to check a request and work out the
 //! change, saves it to the database, then calls `apply` to update its copy of
@@ -10,14 +11,15 @@
 //! the fourth column of the scene's grid (which the GM can adjust; see
 //! `SceneDetail::pixels_per_grid`). A token of `size` 2 covers 2 × 2 squares.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::{
-    geometry::{Point, Segment, crosses_any},
+    geometry::{Point, Segment, crosses_any, segments_intersect},
     uvtt::UvttMap,
+    vision::{ExploredLayout, rasterize, square_visible, visibility_polygon},
 };
 
 const EXPORT_DIR: &str = "../../../client/src/protocol/generated/";
@@ -29,6 +31,14 @@ pub const MAX_TOKEN_SIZE: u8 = 4;
 /// Most tokens one scene can hold. Keeps a buggy or hostile client from
 /// filling the database.
 pub const MAX_TOKENS_PER_SCENE: usize = 500;
+/// Feet per grid square, for vision ranges.
+pub const FEET_PER_SQUARE: f64 = 5.0;
+/// Longest vision range a token can have, in feet.
+pub const MAX_VISION_RANGE_FT: f64 = 1000.0;
+
+fn yes() -> bool {
+    true
+}
 
 /// A token on a scene.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -51,6 +61,12 @@ pub struct Token {
     pub owner_id: Option<i64>,
     /// Hidden tokens exist only for GMs: players are never sent them.
     pub hidden: bool,
+    /// Whether the token can see (VIS-003). Its owner sees what it sees.
+    #[serde(default = "yes")]
+    pub vision: bool,
+    /// How far it sees, in feet; `None` is unlimited.
+    #[serde(default)]
+    pub vision_range: Option<f64>,
 }
 
 /// The settings of a token that a GM can edit (everything except position).
@@ -65,6 +81,21 @@ pub struct TokenSettings {
     #[ts(type = "number | null")]
     pub owner_id: Option<i64>,
     pub hidden: bool,
+    #[serde(default = "yes")]
+    pub vision: bool,
+    #[serde(default)]
+    pub vision_range: Option<f64>,
+}
+
+/// A door's state. Doors are numbered by their place in the map file's
+/// `portals` list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = EXPORT_DIR)]
+pub struct DoorState {
+    pub open: bool,
+    /// Locked doors can't be opened or closed by players (VIS-010).
+    pub locked: bool,
 }
 
 /// A request to change the scene. The server answers each with `Ack` or `Reject`.
@@ -100,6 +131,13 @@ pub enum SceneOp {
         #[ts(type = "number")]
         token_id: i64,
     },
+    /// GM: any unlocked or locked door. Player: an unlocked door within one
+    /// square of a token they own (VIS-007).
+    SetDoor { door: u32, open: bool },
+    /// GM only (VIS-010).
+    LockDoor { door: u32, locked: bool },
+    /// GM only: everyone's explored fog on this scene goes dark again (VIS-005).
+    ResetExplored,
 }
 
 /// Something that happened to the scene. Sent to everyone in it, filtered per
@@ -128,6 +166,12 @@ pub enum SceneEvent {
         #[ts(type = "number")]
         token_id: i64,
     },
+    DoorChanged {
+        door: u32,
+        open: bool,
+        locked: bool,
+    },
+    ExploredReset,
 }
 
 /// Why a request was refused. The client rolls back its optimistic change.
@@ -164,7 +208,8 @@ pub struct Actor {
     pub is_gm: bool,
 }
 
-/// The scene's shape, for bounds and wall checks. Built once per room.
+/// The scene's shape and doors, for bounds, movement and sight. Built once
+/// per room; doors change as they're opened and closed.
 #[derive(Debug, Clone)]
 pub struct SceneRules {
     /// Map picture size, in pixels.
@@ -174,14 +219,23 @@ pub struct SceneRules {
     pub pixels_per_grid: f64,
     pub offset_x: f64,
     pub offset_y: f64,
-    /// Walls and closed doors, in image pixels. Movement can't cross these.
-    pub barriers: Vec<Segment>,
+    /// Walls (UVTT `line_of_sight`), in image pixels: block movement and sight.
+    walls: Vec<Segment>,
+    /// Objects (UVTT `objects_line_of_sight`): block sight only.
+    objects: Vec<Segment>,
+    /// Each door's line, in image pixels, and its state.
+    door_lines: Vec<Segment>,
+    doors: Vec<DoorState>,
+    /// Kept up to date by `rebuild`: walls + closed doors (movement), and
+    /// walls + objects + closed doors (sight).
+    barriers: Vec<Segment>,
+    sight: Vec<Segment>,
 }
 
 impl SceneRules {
-    /// Converts the UVTT file's walls and closed doors (in the *file's* grid
+    /// Converts the UVTT file's walls, objects and doors (in the *file's* grid
     /// squares) to image pixels, which don't change when the GM adjusts the
-    /// scene's grid.
+    /// scene's grid. Doors start as the file says.
     pub fn new(
         map: &UvttMap,
         width: u32,
@@ -195,25 +249,115 @@ impl SceneRules {
         let to_px = |p: crate::uvtt::GridPoint| {
             Point::new((p.x - origin.x) * file_ppg, (p.y - origin.y) * file_ppg)
         };
-
-        let mut barriers = Vec::new();
-        for wall in &map.line_of_sight {
-            // `windows(2)` walks each pair of neighbouring points: one segment each.
-            for pair in wall.windows(2) {
-                barriers.push(Segment::new(to_px(pair[0]), to_px(pair[1])));
-            }
-        }
-        for door in map.portals.iter().filter(|p| p.closed) {
-            barriers.push(Segment::new(to_px(door.bounds[0]), to_px(door.bounds[1])));
-        }
-        Self {
+        // `windows(2)` walks each pair of neighbouring points: one segment each.
+        let lines = |polylines: &Vec<Vec<crate::uvtt::GridPoint>>| -> Vec<Segment> {
+            polylines
+                .iter()
+                .flat_map(|w| {
+                    w.windows(2)
+                        .map(|pair| Segment::new(to_px(pair[0]), to_px(pair[1])))
+                })
+                .collect()
+        };
+        let door_lines = map
+            .portals
+            .iter()
+            .map(|d| Segment::new(to_px(d.bounds[0]), to_px(d.bounds[1])))
+            .collect();
+        let doors = map
+            .portals
+            .iter()
+            .map(|d| DoorState {
+                open: !d.closed,
+                locked: false,
+            })
+            .collect();
+        let mut rules = Self {
             width: f64::from(width),
             height: f64::from(height),
             pixels_per_grid,
             offset_x,
             offset_y,
-            barriers,
+            walls: lines(&map.line_of_sight),
+            objects: lines(&map.objects_line_of_sight),
+            door_lines,
+            doors,
+            barriers: Vec::new(),
+            sight: Vec::new(),
+        };
+        rules.rebuild();
+        rules
+    }
+
+    /// A map of `width` × `height` px with these walls and no doors. For tests.
+    pub fn plain(width: f64, height: f64, pixels_per_grid: f64, walls: Vec<Segment>) -> Self {
+        let mut rules = Self {
+            width,
+            height,
+            pixels_per_grid,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            walls,
+            objects: Vec::new(),
+            door_lines: Vec::new(),
+            doors: Vec::new(),
+            barriers: Vec::new(),
+            sight: Vec::new(),
+        };
+        rules.rebuild();
+        rules
+    }
+
+    /// Adds a door. For tests.
+    pub fn with_door(mut self, line: Segment, state: DoorState) -> Self {
+        self.door_lines.push(line);
+        self.doors.push(state);
+        self.rebuild();
+        self
+    }
+
+    fn rebuild(&mut self) {
+        let closed = self
+            .door_lines
+            .iter()
+            .zip(&self.doors)
+            .filter(|(_, d)| !d.open)
+            .map(|(line, _)| *line);
+        self.barriers = self.walls.iter().copied().chain(closed.clone()).collect();
+        self.sight = self
+            .walls
+            .iter()
+            .chain(&self.objects)
+            .copied()
+            .chain(closed)
+            .collect();
+    }
+
+    pub fn doors(&self) -> &[DoorState] {
+        &self.doors
+    }
+
+    pub fn door_lines(&self) -> &[Segment] {
+        &self.door_lines
+    }
+
+    /// Sets a door's state (loading saved states, or applying a change).
+    /// Unknown door numbers are ignored.
+    pub fn set_door(&mut self, door: u32, state: DoorState) {
+        if let Some(d) = self.doors.get_mut(door as usize) {
+            *d = state;
+            self.rebuild();
         }
+    }
+
+    /// What blocks movement: walls and closed doors.
+    pub fn barriers(&self) -> &[Segment] {
+        &self.barriers
+    }
+
+    /// What blocks sight: walls, objects and closed doors (VIS-002).
+    pub fn sight(&self) -> &[Segment] {
+        &self.sight
     }
 
     /// The centre of a token at (x, y) of `size`, in image pixels.
@@ -233,6 +377,66 @@ impl SceneRules {
             && (0.0..=self.width).contains(&c.x)
             && (0.0..=self.height).contains(&c.y)
     }
+
+    /// A token's vision range in pixels, if limited.
+    pub fn range_px(&self, token: &Token) -> Option<f64> {
+        token
+            .vision_range
+            .map(|ft| ft / FEET_PER_SQUARE * self.pixels_per_grid)
+    }
+
+    /// The area a token sees, as a polygon in image pixels.
+    pub fn vision_polygon(&self, token: &Token) -> Vec<Point> {
+        visibility_polygon(
+            self.center_px(token.x, token.y, token.size),
+            &self.sight,
+            self.width,
+            self.height,
+            self.range_px(token),
+        )
+    }
+
+    /// Can `viewer` see any part of `target`?
+    pub fn sees(&self, viewer: &Token, target: &Token) -> bool {
+        square_visible(
+            self.center_px(viewer.x, viewer.y, viewer.size),
+            self.center_px(target.x, target.y, target.size),
+            f64::from(target.size) * self.pixels_per_grid / 2.0,
+            &self.sight,
+            self.range_px(viewer),
+        )
+    }
+
+    /// Is the door within one square of the token? True when the door's line
+    /// touches the token's square grown by one square on every side.
+    pub fn door_near(&self, door: u32, token: &Token) -> bool {
+        let Some(line) = self.door_lines.get(door as usize) else {
+            return false;
+        };
+        let ppg = self.pixels_per_grid;
+        let x0 = (token.x - 1.0) * ppg + self.offset_x;
+        let y0 = (token.y - 1.0) * ppg + self.offset_y;
+        let side = (f64::from(token.size) + 2.0) * ppg;
+        segment_touches_rect(*line, x0, y0, x0 + side, y0 + side)
+    }
+}
+
+/// Does segment `s` touch the rectangle from (x0, y0) to (x1, y1)? Either an
+/// end is inside, or it crosses one of the four sides.
+fn segment_touches_rect(s: Segment, x0: f64, y0: f64, x1: f64, y1: f64) -> bool {
+    let inside = |p: Point| (x0..=x1).contains(&p.x) && (y0..=y1).contains(&p.y);
+    if inside(s.a) || inside(s.b) {
+        return true;
+    }
+    let (a, b, c, d) = (
+        Point::new(x0, y0),
+        Point::new(x1, y0),
+        Point::new(x1, y1),
+        Point::new(x0, y1),
+    );
+    [(a, b), (b, c), (c, d), (d, a)]
+        .into_iter()
+        .any(|(p, q)| segments_intersect(s, Segment::new(p, q)))
 }
 
 /// A checked change, ready to save and then `apply`.
@@ -249,6 +453,11 @@ pub enum Change {
     Remove {
         token_id: i64,
     },
+    Door {
+        door: u32,
+        state: DoorState,
+    },
+    ResetExplored,
 }
 
 /// The tokens of one scene, by id. A `BTreeMap` keeps them in id order, so
@@ -293,7 +502,7 @@ pub fn plan(
                     rules.center_px(token.x, token.y, token.size),
                     rules.center_px(*x, *y, token.size),
                 );
-                if crosses_any(path, &rules.barriers) {
+                if crosses_any(path, rules.barriers()) {
                     return reject(
                         RejectCode::Blocked,
                         "There's a wall or a closed door in the way.",
@@ -329,94 +538,158 @@ pub fn plan(
                 token_id: *token_id,
             })
         }
+
+        SceneOp::SetDoor { door, open } => {
+            let Some(current) = rules.doors().get(*door as usize).copied() else {
+                return reject(RejectCode::NotFound, "There's no such door.");
+            };
+            if !actor.is_gm {
+                if current.locked {
+                    return reject(RejectCode::Forbidden, "That door is locked.");
+                }
+                let near = tokens.values().any(|t| {
+                    t.owner_id == Some(actor.user_id) && !t.hidden && rules.door_near(*door, t)
+                });
+                if !near {
+                    return reject(
+                        RejectCode::Forbidden,
+                        "Move one of your tokens next to the door first.",
+                    );
+                }
+            }
+            Ok(Change::Door {
+                door: *door,
+                state: DoorState {
+                    open: *open,
+                    ..current
+                },
+            })
+        }
+
+        SceneOp::LockDoor { door, locked } => {
+            require_gm(actor)?;
+            let Some(current) = rules.doors().get(*door as usize).copied() else {
+                return reject(RejectCode::NotFound, "There's no such door.");
+            };
+            Ok(Change::Door {
+                door: *door,
+                state: DoorState {
+                    locked: *locked,
+                    ..current
+                },
+            })
+        }
+
+        SceneOp::ResetExplored => {
+            require_gm(actor)?;
+            Ok(Change::ResetExplored)
+        }
     }
 }
 
-/// The result of applying a change: the event, and whether the token was
-/// hidden before and after, which decides what players are told.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Applied {
-    pub event: SceneEvent,
-    pub hidden_before: bool,
-    pub hidden_after: bool,
-}
-
-/// Applies a checked (and saved) change to the state. For `Create`, the token
-/// must have its real id by now.
-pub fn apply(tokens: &mut Tokens, change: Change) -> Applied {
+/// Applies a checked (and saved) change to the state, and returns the event
+/// that describes it. For `Create`, the token must have its real id by now.
+pub fn apply(tokens: &mut Tokens, rules: &mut SceneRules, change: Change) -> SceneEvent {
     match change {
         Change::Create(token) => {
-            let hidden = token.hidden;
             tokens.insert(token.id, token.clone());
-            Applied {
-                event: SceneEvent::TokenCreated { token },
-                hidden_before: hidden,
-                hidden_after: hidden,
-            }
+            SceneEvent::TokenCreated { token }
         }
         Change::Update(token) => {
-            let before = tokens.get(&token.id).is_some_and(|t| t.hidden);
-            let after = token.hidden;
             tokens.insert(token.id, token.clone());
-            Applied {
-                event: SceneEvent::TokenUpdated { token },
-                hidden_before: before,
-                hidden_after: after,
-            }
+            SceneEvent::TokenUpdated { token }
         }
         Change::Move { token_id, x, y } => {
             // `get_mut` borrows the stored token mutably, so the update is in place.
-            let hidden = match tokens.get_mut(&token_id) {
-                Some(t) => {
-                    t.x = x;
-                    t.y = y;
-                    t.hidden
-                }
-                None => false,
-            };
-            Applied {
-                event: SceneEvent::TokenMoved { token_id, x, y },
-                hidden_before: hidden,
-                hidden_after: hidden,
+            if let Some(t) = tokens.get_mut(&token_id) {
+                t.x = x;
+                t.y = y;
             }
+            SceneEvent::TokenMoved { token_id, x, y }
         }
         Change::Remove { token_id } => {
-            let hidden = tokens.remove(&token_id).is_some_and(|t| t.hidden);
-            Applied {
-                event: SceneEvent::TokenRemoved { token_id },
-                hidden_before: hidden,
-                hidden_after: hidden,
+            tokens.remove(&token_id);
+            SceneEvent::TokenRemoved { token_id }
+        }
+        Change::Door { door, state } => {
+            rules.set_door(door, state);
+            SceneEvent::DoorChanged {
+                door,
+                open: state.open,
+                locked: state.locked,
             }
         }
+        Change::ResetExplored => SceneEvent::ExploredReset,
     }
 }
 
-/// What a player is told about an event, if anything. Hidden tokens don't
-/// exist for players: hiding one looks like it was removed, and revealing one
-/// looks like it was created.
-pub fn for_player(applied: &Applied) -> Option<SceneEvent> {
-    let (before, after) = (applied.hidden_before, applied.hidden_after);
-    match &applied.event {
-        SceneEvent::TokenUpdated { token } => match (before, after) {
-            (true, true) => None,
-            (false, true) => Some(SceneEvent::TokenRemoved { token_id: token.id }),
-            (true, false) => Some(SceneEvent::TokenCreated {
-                token: token.clone(),
-            }),
-            (false, false) => Some(applied.event.clone()),
-        },
-        _ if after || before => None,
-        other => Some(other.clone()),
-    }
-}
-
-/// The tokens someone should see when they join.
-pub fn visible_tokens(tokens: &Tokens, is_gm: bool) -> Vec<Token> {
+/// The tokens a player may know about right now (VIS-004, VIS-008): their own
+/// tokens, and any other token one of their seeing tokens can see. Hidden
+/// tokens never count, even their own.
+pub fn visible_to(tokens: &Tokens, rules: &SceneRules, user_id: i64) -> BTreeSet<i64> {
+    let mine: Vec<&Token> = tokens
+        .values()
+        .filter(|t| t.owner_id == Some(user_id) && !t.hidden)
+        .collect();
+    let eyes: Vec<&Token> = mine.iter().copied().filter(|t| t.vision).collect();
     tokens
         .values()
-        .filter(|t| is_gm || !t.hidden)
-        .cloned()
+        .filter(|t| !t.hidden)
+        .filter(|t| t.owner_id == Some(user_id) || eyes.iter().any(|e| rules.sees(e, t)))
+        .map(|t| t.id)
         .collect()
+}
+
+/// What one player is told after a change, given which tokens they could see
+/// before and can see now. Tokens that came into view arrive as
+/// `TokenCreated`, tokens that left it as `TokenRemoved`; the event itself
+/// goes through only if it's about something they saw both before and after,
+/// or about the scene (doors, explored fog).
+pub fn player_events(
+    before: &BTreeSet<i64>,
+    after: &BTreeSet<i64>,
+    tokens: &Tokens,
+    event: &SceneEvent,
+) -> Vec<SceneEvent> {
+    let mut out: Vec<SceneEvent> = before
+        .difference(after)
+        .map(|&token_id| SceneEvent::TokenRemoved { token_id })
+        .collect();
+    out.extend(
+        after
+            .difference(before)
+            .filter_map(|id| tokens.get(id))
+            .map(|token| SceneEvent::TokenCreated {
+                token: token.clone(),
+            }),
+    );
+    let seen = |id: &i64| before.contains(id) && after.contains(id);
+    match event {
+        SceneEvent::TokenMoved { token_id, .. } if seen(token_id) => out.push(event.clone()),
+        SceneEvent::TokenUpdated { token } if seen(&token.id) => out.push(event.clone()),
+        SceneEvent::DoorChanged { .. } | SceneEvent::ExploredReset => out.push(event.clone()),
+        _ => {}
+    }
+    out
+}
+
+/// Marks what a player's tokens can see now as explored (VIS-005). Returns
+/// whether anything new was seen.
+pub fn explore(
+    tokens: &Tokens,
+    rules: &SceneRules,
+    user_id: i64,
+    layout: ExploredLayout,
+    bits: &mut [u8],
+) -> bool {
+    let mut changed = false;
+    for t in tokens
+        .values()
+        .filter(|t| t.owner_id == Some(user_id) && !t.hidden && t.vision)
+    {
+        changed |= rasterize(&rules.vision_polygon(t), layout, bits);
+    }
+    changed
 }
 
 /// Trims and checks a token's name.
@@ -441,6 +714,14 @@ fn check_settings(s: &TokenSettings) -> Result<TokenSettings, Rejection> {
     if !(MIN_TOKEN_SIZE..=MAX_TOKEN_SIZE).contains(&s.size) {
         return reject(RejectCode::Invalid, "A token is 1 to 4 squares across.");
     }
+    if let Some(r) = s.vision_range
+        && !(r.is_finite() && r > 0.0 && r <= MAX_VISION_RANGE_FT)
+    {
+        return reject(
+            RejectCode::Invalid,
+            "A vision range is more than 0 and at most 1000 feet.",
+        );
+    }
     Ok(TokenSettings { name, ..s.clone() })
 }
 
@@ -454,6 +735,8 @@ fn token_from(id: i64, s: &TokenSettings, x: f64, y: f64) -> Token {
         size: s.size,
         owner_id: s.owner_id,
         hidden: s.hidden,
+        vision: s.vision,
+        vision_range: s.vision_range,
     }
 }
 
@@ -494,17 +777,15 @@ mod tests {
     /// A 10 × 10 square map at 50 px per square, with one wall down the
     /// middle (x = 250 px, from top to bottom).
     fn rules() -> SceneRules {
-        SceneRules {
-            width: 500.0,
-            height: 500.0,
-            pixels_per_grid: 50.0,
-            offset_x: 0.0,
-            offset_y: 0.0,
-            barriers: vec![Segment::new(
+        SceneRules::plain(
+            500.0,
+            500.0,
+            50.0,
+            vec![Segment::new(
                 Point::new(250.0, 0.0),
                 Point::new(250.0, 500.0),
             )],
-        }
+        )
     }
 
     fn settings(name: &str, owner: Option<i64>, hidden: bool) -> TokenSettings {
@@ -514,6 +795,8 @@ mod tests {
             size: 1,
             owner_id: owner,
             hidden,
+            vision: true,
+            vision_range: None,
         }
     }
 
@@ -591,9 +874,7 @@ mod tests {
             RejectCode::NotFound
         );
         assert!(plan(&tokens(), &rules(), GM, &mv(2, 7.0, 7.0)).is_ok());
-        let visible = visible_tokens(&tokens(), false);
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible_tokens(&tokens(), true).len(), 2);
+        assert_eq!(visible_to(&tokens(), &rules(), 2), BTreeSet::from([1]));
     }
 
     #[test]
@@ -629,10 +910,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_updates_state_and_reports_hidden_changes() {
-        let mut t = tokens();
-        let applied = apply(
+    fn apply_updates_state() {
+        let (mut t, mut r) = (tokens(), rules());
+        let ev = apply(
             &mut t,
+            &mut r,
             Change::Move {
                 token_id: 1,
                 x: 3.0,
@@ -641,52 +923,189 @@ mod tests {
         );
         assert_eq!((t[&1].x, t[&1].y), (3.0, 4.0));
         assert_eq!(
-            for_player(&applied),
-            Some(SceneEvent::TokenMoved {
+            ev,
+            SceneEvent::TokenMoved {
                 token_id: 1,
                 x: 3.0,
                 y: 4.0
-            })
+            }
         );
+        apply(&mut t, &mut r, Change::Remove { token_id: 2 });
+        assert!(!t.contains_key(&2));
+    }
 
-        // The GM hides Vex's token: players are told it was removed.
-        let hidden = Token {
-            hidden: true,
-            ..t[&1].clone()
+    /// Vex at (1, 1) and Rook at (7, 1) on opposite sides of the wall; a
+    /// thug at (2, 3) on Vex's side.
+    fn party() -> Tokens {
+        let mut t = Tokens::new();
+        t.insert(1, token_from(1, &settings("Vex", Some(2), false), 1.0, 1.0));
+        t.insert(
+            2,
+            token_from(2, &settings("Rook", Some(3), false), 7.0, 1.0),
+        );
+        t.insert(3, token_from(3, &settings("Thug", None, false), 2.0, 3.0));
+        t
+    }
+
+    #[test]
+    fn players_see_only_what_their_tokens_see() {
+        let (t, r) = (party(), rules());
+        assert_eq!(visible_to(&t, &r, 2), BTreeSet::from([1, 3]));
+        assert_eq!(visible_to(&t, &r, 3), BTreeSet::from([2]));
+        // Without vision, Vex's player sees only Vex.
+        let mut blind = t.clone();
+        blind.get_mut(&1).unwrap().vision = false;
+        assert_eq!(visible_to(&blind, &r, 2), BTreeSet::from([1]));
+        // With a 5 ft range, the thug two squares away is out of sight.
+        let mut short = t.clone();
+        short.get_mut(&1).unwrap().vision_range = Some(5.0);
+        assert_eq!(visible_to(&short, &r, 2), BTreeSet::from([1]));
+        // Hidden tokens never count.
+        let mut hidden = t.clone();
+        hidden.get_mut(&3).unwrap().hidden = true;
+        assert_eq!(visible_to(&hidden, &r, 2), BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn player_events_follow_their_view() {
+        let mut t = party();
+        let before = BTreeSet::from([1, 3]);
+        // The thug walks behind the wall: Vex's player is told it left.
+        t.get_mut(&3).unwrap().x = 8.0;
+        let after = visible_to(&t, &rules(), 2);
+        let moved = SceneEvent::TokenMoved {
+            token_id: 3,
+            x: 8.0,
+            y: 3.0,
         };
-        let applied = apply(&mut t, Change::Update(hidden));
         assert_eq!(
-            for_player(&applied),
-            Some(SceneEvent::TokenRemoved { token_id: 1 })
+            player_events(&before, &after, &t, &moved),
+            vec![SceneEvent::TokenRemoved { token_id: 3 }]
         );
-
-        // Moving a hidden token tells players nothing.
-        let applied = apply(
-            &mut t,
-            Change::Move {
-                token_id: 1,
-                x: 5.0,
-                y: 5.0,
-            },
-        );
-        assert_eq!(for_player(&applied), None);
-
-        // Revealing it looks like it was just created, at its new position.
-        let shown = Token {
-            hidden: false,
-            ..t[&1].clone()
-        };
-        match for_player(&apply(&mut t, Change::Update(shown))) {
-            Some(SceneEvent::TokenCreated { token }) => assert_eq!((token.x, token.y), (5.0, 5.0)),
+        // Rook's player sees it arrive, as a new token at its new place.
+        let rook_after = visible_to(&t, &rules(), 3);
+        match &player_events(&BTreeSet::from([2]), &rook_after, &t, &moved)[..] {
+            [SceneEvent::TokenCreated { token }] => assert_eq!(token.x, 8.0),
             other => panic!("unexpected {other:?}"),
         }
-
-        // Removing a hidden token tells players nothing.
+        // Something seen before and after: the event itself goes through.
+        let vex_moved = SceneEvent::TokenMoved {
+            token_id: 1,
+            x: 1.0,
+            y: 2.0,
+        };
         assert_eq!(
-            for_player(&apply(&mut t, Change::Remove { token_id: 2 })),
-            None
+            player_events(&after, &after, &t, &vex_moved),
+            vec![vex_moved.clone()]
         );
-        assert!(!t.contains_key(&2));
+    }
+
+    #[test]
+    fn doors_open_for_nearby_players_and_block_until_open() {
+        // A closed door in the wall, from (250, 0) to (250, 100): squares 0–1 of column 5.
+        let door = Segment::new(Point::new(250.0, 0.0), Point::new(250.0, 100.0));
+        let closed = DoorState {
+            open: false,
+            locked: false,
+        };
+        let mut r = SceneRules::plain(500.0, 500.0, 50.0, vec![]).with_door(door, closed);
+        let mut t = party();
+        let open = SceneOp::SetDoor {
+            door: 0,
+            open: true,
+        };
+
+        // Vex at (1, 1) is too far; at (4, 1) he's next to it.
+        assert_eq!(
+            plan(&t, &r, VEX, &open).unwrap_err().code,
+            RejectCode::Forbidden
+        );
+        t.get_mut(&1).unwrap().x = 4.0;
+        // Closed, the door hides Rook from Vex.
+        assert_eq!(visible_to(&t, &r, 2), BTreeSet::from([1, 3]));
+        let change = plan(&t, &r, VEX, &open).unwrap();
+        let ev = apply(&mut t, &mut r, change);
+        assert_eq!(
+            ev,
+            SceneEvent::DoorChanged {
+                door: 0,
+                open: true,
+                locked: false
+            }
+        );
+        assert!(visible_to(&t, &r, 2).contains(&2));
+        assert!(r.barriers().is_empty());
+
+        // Locked: only the GM can open or close it.
+        let lock = plan(
+            &t,
+            &r,
+            GM,
+            &SceneOp::LockDoor {
+                door: 0,
+                locked: true,
+            },
+        )
+        .unwrap();
+        apply(&mut t, &mut r, lock);
+        let close = SceneOp::SetDoor {
+            door: 0,
+            open: false,
+        };
+        assert_eq!(
+            plan(&t, &r, VEX, &close).unwrap_err().message,
+            "That door is locked."
+        );
+        assert!(plan(&t, &r, GM, &close).is_ok());
+        assert_eq!(
+            plan(
+                &t,
+                &r,
+                VEX,
+                &SceneOp::LockDoor {
+                    door: 0,
+                    locked: false
+                }
+            )
+            .unwrap_err()
+            .code,
+            RejectCode::Forbidden
+        );
+        assert_eq!(
+            plan(
+                &t,
+                &r,
+                GM,
+                &SceneOp::SetDoor {
+                    door: 9,
+                    open: true
+                }
+            )
+            .unwrap_err()
+            .code,
+            RejectCode::NotFound
+        );
+    }
+
+    #[test]
+    fn explored_area_grows_as_tokens_move() {
+        let (mut t, r) = (party(), rules());
+        let layout = ExploredLayout::for_map(r.width, r.height);
+        let mut bits = vec![0u8; layout.byte_len()];
+        assert!(explore(&t, &r, 2, layout, &mut bits));
+        let count = |b: &[u8]| b.iter().map(|x| x.count_ones()).sum::<u32>();
+        let first = count(&bits);
+        // Vex sees the left half of the map: about half the cells.
+        let total = layout.cols * layout.rows;
+        assert!(
+            (first as f64 / total as f64 - 0.5).abs() < 0.02,
+            "{first} of {total}"
+        );
+        // Seeing the same again adds nothing; Rook's side is new to Vex's player.
+        assert!(!explore(&t, &r, 2, layout, &mut bits));
+        t.get_mut(&1).unwrap().x = 7.0;
+        assert!(explore(&t, &r, 2, layout, &mut bits));
+        assert_eq!(count(&bits), total);
     }
 
     #[test]
@@ -699,11 +1118,12 @@ mod tests {
         let rules = SceneRules::new(&map, 840, 700, 70.0, 0.0, 0.0);
         let segments: usize = map.line_of_sight.iter().map(|w| w.len() - 1).sum();
         let closed = map.portals.iter().filter(|p| p.closed).count();
-        assert_eq!(rules.barriers.len(), segments + closed);
+        assert_eq!(rules.barriers().len(), segments + closed);
+        assert_eq!(rules.doors().len(), map.portals.len());
         // Every barrier lies on the picture.
         assert!(
             rules
-                .barriers
+                .barriers()
                 .iter()
                 .all(|s| (0.0..=840.0).contains(&s.a.x) && (0.0..=700.0).contains(&s.b.y))
         );

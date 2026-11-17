@@ -4,8 +4,8 @@ import type { Token } from "../protocol/generated/Token";
 import { renderTokens } from "./renderTokens";
 
 const spec = { pixelsPerGrid: 50, origin: grid(-0.5, 0) }; // Grid offset 25 px right.
-const a: Token = { id: 1, name: "A", assetId: 7, x: 2, y: 3, size: 1, ownerId: null, hidden: false };
-const b: Token = { id: 2, name: "B", assetId: null, x: 0, y: 0, size: 2, ownerId: null, hidden: true };
+const a: Token = { id: 1, name: "A", assetId: 7, x: 2, y: 3, size: 1, ownerId: null, hidden: false, vision: true, visionRange: null };
+const b: Token = { id: 2, name: "B", assetId: null, x: 0, y: 0, size: 2, ownerId: null, hidden: true, vision: true, visionRange: null };
 const base = { tokens: [a, b], grid: spec, selectedId: 1, drag: null, remote: new Map(), imageUrl: (id: number) => `/img/${id}` };
 
 describe("renderTokens", () => {

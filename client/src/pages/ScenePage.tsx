@@ -18,6 +18,8 @@ import { TokenDialog } from "../scene/TokenDialog";
 import { renderTokens } from "../scene/renderTokens";
 import { SceneStore } from "../scene/sceneStore";
 import { type DragState, TokenDragController, tokenAt } from "../scene/tokenDrag";
+import { doorAt } from "../vision/doors";
+import { useVision } from "../vision/useVision";
 
 type Dialog = { mode: "create" } | { mode: "edit"; token: Token } | null;
 
@@ -45,6 +47,9 @@ export function ScenePage() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [menu, setMenu] = useState<{ tokenId: number; at: ScreenPoint } | null>(null);
+  const [doorMenu, setDoorMenu] = useState<{ door: number; at: ScreenPoint } | null>(null);
+  /** GM: preview what this player sees (VIS-006). */
+  const [previewId, setPreviewId] = useState<number | null>(null);
   const [dialog, setDialog] = useState<Dialog>(null);
 
   // Load the scene and its tiles. Free the tiles when leaving or switching scenes.
@@ -98,6 +103,16 @@ export function ScenePage() {
   const isGm = view.role === "gm" || (view.role === null && campaign.kind === "ready" && campaign.data.role === "gm");
   const grid: GridSpec | null = scene ? sceneGrid(scene.pixelsPerGrid, scene.gridOffsetX, scene.gridOffsetY) : null;
 
+  // Players see through their own tokens' eyes; a GM sees everything unless
+  // previewing a player.
+  const vision = useVision({
+    scene,
+    view,
+    viewerId: isGm ? previewId : me.id,
+    explore: !isGm,
+    drag,
+  });
+
   // Players follow the GM to the scene they put everyone on (MAP-010).
   const [activeSceneId, setActiveSceneId] = useState<number | null>(null);
   useEffect(() => {
@@ -127,8 +142,8 @@ export function ScenePage() {
 
   // The drag controller lives as long as the page. It reads the latest values
   // through this ref, so it never works from a stale render.
-  const latest = useRef({ tokens: view.tokens, grid, isGm, snap });
-  latest.current = { tokens: view.tokens, grid, isGm, snap };
+  const latest = useRef({ tokens: view.tokens, grid, isGm, snap, doors: vision.doors, zoom });
+  latest.current = { tokens: view.tokens, grid, isGm, snap, doors: vision.doors, zoom };
   const dragController = useMemo(
     () =>
       new TokenDragController({
@@ -149,18 +164,43 @@ export function ScenePage() {
     [store, me.id],
   );
 
-  const onTap = useCallback((p: PointerInfo) => {
-    setMenu(null);
-    const g = latest.current.grid;
-    setSelectedId(g ? (tokenAt(latest.current.tokens, g, p.world)?.id ?? null) : null);
+  /** The door under a pointer: within 14 screen pixels of its line. */
+  const doorUnder = useCallback((p: PointerInfo) => {
+    const tolerance = 14 / (latest.current.zoom / 100);
+    return doorAt(latest.current.doors, p.world.x, p.world.y, tolerance);
   }, []);
-  const onContextMenu = useCallback((p: PointerInfo) => {
-    const g = latest.current.grid;
-    const t = g ? tokenAt(latest.current.tokens, g, p.world) : null;
-    if (!t || !latest.current.isGm) return setMenu(null);
-    setSelectedId(t.id);
-    setMenu({ tokenId: t.id, at: p.screen });
-  }, []);
+
+  // A tap selects a token; on a door it opens or closes it (VIS-007).
+  const onTap = useCallback(
+    (p: PointerInfo) => {
+      setMenu(null);
+      setDoorMenu(null);
+      const g = latest.current.grid;
+      const t = g ? tokenAt(latest.current.tokens, g, p.world) : null;
+      if (t) return setSelectedId(t.id);
+      setSelectedId(null);
+      const door = doorUnder(p);
+      if (door !== null) store.setDoor(door, !latest.current.doors[door]!.open);
+    },
+    [doorUnder, store],
+  );
+  const onContextMenu = useCallback(
+    (p: PointerInfo) => {
+      setMenu(null);
+      setDoorMenu(null);
+      if (!latest.current.isGm) return;
+      const g = latest.current.grid;
+      const t = g ? tokenAt(latest.current.tokens, g, p.world) : null;
+      if (t) {
+        setSelectedId(t.id);
+        setMenu({ tokenId: t.id, at: p.screen });
+        return;
+      }
+      const door = doorUnder(p);
+      if (door !== null) setDoorMenu({ door, at: p.screen });
+    },
+    [doorUnder],
+  );
 
   // Keyboard: Escape clears the selection; Delete removes the selected token (GM).
   useEffect(() => {
@@ -181,7 +221,8 @@ export function ScenePage() {
     () =>
       grid
         ? renderTokens({
-            tokens: view.tokens,
+            // In a preview, only what that player would be sent.
+            tokens: vision.visibleIds ? view.tokens.filter((t) => vision.visibleIds!.has(t.id)) : view.tokens,
             grid,
             selectedId,
             drag,
@@ -191,7 +232,7 @@ export function ScenePage() {
         : [],
     // `grid` is rebuilt every render; its inputs are what matter.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [view.tokens, view.dragging, selectedId, drag, scene, campaignId],
+    [view.tokens, view.dragging, selectedId, drag, scene, campaignId, vision.visibleIds],
   );
 
   function addToken(settings: TokenSettings) {
@@ -212,8 +253,18 @@ export function ScenePage() {
   }
 
   const menuToken = menu ? view.tokens.find((t) => t.id === menu.tokenId) : undefined;
-  const settingsOf = (t: Token): TokenSettings => ({ name: t.name, assetId: t.assetId, size: t.size, ownerId: t.ownerId, hidden: t.hidden });
+  const settingsOf = (t: Token): TokenSettings => ({
+    name: t.name,
+    assetId: t.assetId,
+    size: t.size,
+    ownerId: t.ownerId,
+    hidden: t.hidden,
+    vision: t.vision,
+    visionRange: t.visionRange,
+  });
   const members = campaign.kind === "ready" ? campaign.data.members : [];
+  const players = members.filter((m) => m.role === "player");
+  const doorMenuState = doorMenu ? view.doors[doorMenu.door] : undefined;
 
   return (
     <div className="map-view">
@@ -232,6 +283,35 @@ export function ScenePage() {
         {isGm && (
           <button type="button" onClick={() => setDialog({ mode: "create" })} disabled={!scene || view.status !== "live"}>
             Add token
+          </button>
+        )}
+        {isGm && (
+          <label className="preview">
+            View as
+            <select
+              value={previewId ?? ""}
+              onChange={(e) => setPreviewId(e.target.value ? Number(e.target.value) : null)}
+              aria-label="View as"
+            >
+              <option value="">GM (everything)</option>
+              {players.map((m) => (
+                <option key={m.userId} value={m.userId}>
+                  {m.displayName}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {isGm && (
+          <button
+            type="button"
+            className="secondary"
+            disabled={view.status !== "live"}
+            onClick={() => {
+              if (window.confirm("Reset explored areas for every player on this scene?")) store.resetExplored();
+            }}
+          >
+            Reset fog
           </button>
         )}
         <button type="button" className="secondary" onClick={() => setSnap((v) => !v)} aria-pressed={snap} title="Hold Alt while dropping to skip snapping once">
@@ -261,6 +341,8 @@ export function ScenePage() {
           map={map}
           gridVisible={gridVisible}
           tokens={rendered}
+          doors={vision.doors}
+          fog={vision.fog}
           pointerHandler={view.status === "live" && grid ? dragController : null}
           onTap={onTap}
           onContextMenu={onContextMenu}
@@ -270,6 +352,30 @@ export function ScenePage() {
           {error && <div className="overlay center error">{error}</div>}
           {map && <MapInfo map={map} />}
           {map && view.status === "joining" && <div className="overlay top">Joining the table…</div>}
+          {map && view.status === "live" && vision.blind && (
+            <div className="overlay top">
+              {isGm ? "This player has no token that can see here." : "You have no token that can see on this scene."}
+            </div>
+          )}
+          {vision.error && <div className="overlay top error">{vision.error}</div>}
+          {doorMenu && doorMenuState && (
+            <div className="token-menu" role="menu" style={{ left: doorMenu.at.x, top: doorMenu.at.y }}>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => (store.setDoor(doorMenu.door, !doorMenuState.open), setDoorMenu(null))}
+              >
+                {doorMenuState.open ? "Close door" : "Open door"}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => (store.lockDoor(doorMenu.door, !doorMenuState.locked), setDoorMenu(null))}
+              >
+                {doorMenuState.locked ? "Unlock" : "Lock"}
+              </button>
+            </div>
+          )}
           {view.notice && (
             <div className="toast" role="status">
               {view.notice}

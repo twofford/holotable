@@ -5,8 +5,8 @@ import type { Token } from "../protocol/generated/Token";
 import { type DragState, TokenDragController, distanceFeet, tokenAt } from "./tokenDrag";
 
 const spec: GridSpec = { pixelsPerGrid: 50, origin: grid(0, 0) };
-const mine: Token = { id: 1, name: "Vex", assetId: null, x: 2, y: 2, size: 1, ownerId: 2, hidden: false };
-const theirs: Token = { id: 2, name: "Thug", assetId: null, x: 5, y: 5, size: 2, ownerId: null, hidden: false };
+const mine: Token = { id: 1, name: "Vex", assetId: null, x: 2, y: 2, size: 1, ownerId: 2, hidden: false, vision: true, visionRange: null };
+const theirs: Token = { id: 2, name: "Thug", assetId: null, x: 5, y: 5, size: 2, ownerId: null, hidden: false, vision: true, visionRange: null };
 
 /** A pointer at world (x, y); screen = world, for simplicity. */
 const at = (x: number, y: number, extra: Partial<PointerInfo> = {}): PointerInfo => ({

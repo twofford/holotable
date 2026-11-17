@@ -170,11 +170,15 @@ async fn handle_text(
     text: &str,
     awaiting: &mut Option<(u32, Instant)>,
 ) {
-    let reply = |msg| outbox.try_send(Outgoing::Msg(msg));
+    // A full outbox means the client is far behind; dropping a reply is fine
+    // (the writer will close it soon), so the result is ignored.
+    let reply = |msg| {
+        let _ = outbox.try_send(Outgoing::Msg(msg));
+    };
     let msg = match serde_json::from_str::<ClientMsg>(text) {
         Ok(msg) => msg,
         Err(err) => {
-            let _ = reply(ServerMsg::Error {
+            reply(ServerMsg::Error {
                 message: format!("bad message: {err}"),
             });
             return;
@@ -182,7 +186,7 @@ async fn handle_text(
     };
     match msg {
         ClientMsg::Ping { nonce } => {
-            let _ = reply(ServerMsg::Pong { nonce });
+            reply(ServerMsg::Pong { nonce });
         }
         ClientMsg::Pong { nonce } => {
             // `take()` moves the value out and leaves `None` behind.
@@ -201,14 +205,14 @@ async fn handle_text(
             match state.hub.join(conn, scene_id, resume).await {
                 Ok(()) => {}
                 Err(JoinError::NotFound) => {
-                    let _ = reply(ServerMsg::Kicked {
+                    reply(ServerMsg::Kicked {
                         reason: "That scene doesn't exist, or isn't yours to see.".into(),
                         rejoin: false,
                     });
                 }
                 Err(JoinError::Internal(e)) => {
                     tracing::error!(error = %e, scene_id, "joining a scene failed");
-                    let _ = reply(ServerMsg::Error {
+                    reply(ServerMsg::Error {
                         message: "The server couldn't open that scene.".into(),
                     });
                 }
@@ -217,7 +221,7 @@ async fn handle_text(
         ClientMsg::LeaveScene => state.hub.leave(conn),
         ClientMsg::Op { req_id, op } => {
             if !state.hub.op(conn, req_id, op).await {
-                let _ = reply(ServerMsg::Reject {
+                reply(ServerMsg::Reject {
                     req_id,
                     code: RejectCode::NotFound,
                     message: "You're not in a scene.".into(),

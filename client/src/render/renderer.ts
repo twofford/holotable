@@ -5,12 +5,17 @@
 import { Application, Container, Graphics, Sprite, Text, Texture } from "pixi.js";
 import type { Camera, GridSpec } from "../map/coords";
 import type { LoadedMap } from "../map/loadUvtt";
+import type { RenderDoor } from "../vision/doors";
 
 export class Renderer {
   /** Everything drawn in world space. The camera moves and scales this container. */
   private readonly world = new Container();
   private readonly mapLayer = new Container();
   private readonly gridLayer = new Graphics();
+  private readonly doorLayer = new Graphics();
+  /** The fog of war: one picture over the map, painted by `FogPainter`. */
+  private readonly fogSprite = new Sprite();
+  private fogSource: HTMLCanvasElement | null = null;
   private readonly tokenLayer = new Container();
   /** One display object per token key, reused while its look doesn't change. */
   private readonly tokenNodes = new Map<string, { node: Container; look: string }>();
@@ -23,7 +28,9 @@ export class Renderer {
   // `private constructor` + `static async create` is a common pattern when setup
   // must await something: a constructor can't be async.
   private constructor(private readonly app: Application) {
-    this.world.addChild(this.mapLayer, this.gridLayer, this.tokenLayer);
+    // Drawn bottom to top. Doors are under the fog, so a door in the dark stays hidden.
+    this.world.addChild(this.mapLayer, this.gridLayer, this.doorLayer, this.fogSprite, this.tokenLayer);
+    this.fogSprite.visible = false;
     app.stage.addChild(this.world);
   }
 
@@ -81,6 +88,43 @@ export class Renderer {
   setCamera(cam: Camera): void {
     this.world.scale.set(cam.scale);
     this.world.position.set(-cam.x * cam.scale, -cam.y * cam.scale);
+  }
+
+  /**
+   * Draws the doors: closed ones as solid bars, open ones as thin lines, and
+   * locked ones in red. Line widths are in screen pixels, so doors stay easy
+   * to see and tap at any zoom.
+   */
+  setDoors(doors: readonly RenderDoor[]): void {
+    const g = this.doorLayer;
+    g.clear();
+    for (const d of doors) {
+      const color = d.locked ? 0xff5c7a : d.open ? 0x7ef0b5 : 0xffb347;
+      g.moveTo(d.x1, d.y1).lineTo(d.x2, d.y2);
+      g.stroke({ color, width: d.open ? 2 : 6, alpha: d.open ? 0.7 : 0.95, pixelLine: false, cap: "round" });
+    }
+  }
+
+  /**
+   * Shows the fog canvas over the map, or hides it (`null`). Call again with
+   * the same canvas after repainting it, to upload the new picture.
+   */
+  setFog(canvas: HTMLCanvasElement | null, worldWidth = 0, worldHeight = 0): void {
+    if (!canvas) {
+      this.fogSprite.visible = false;
+      return;
+    }
+    if (canvas !== this.fogSource) {
+      // The sprite starts with Pixi's shared empty texture: never destroy that one.
+      if (this.fogSource) this.fogSprite.texture.destroy(true);
+      this.fogSprite.texture = Texture.from(canvas);
+      this.fogSource = canvas;
+    } else {
+      this.fogSprite.texture.source.update();
+    }
+    this.fogSprite.width = worldWidth;
+    this.fogSprite.height = worldHeight;
+    this.fogSprite.visible = true;
   }
 
   /**

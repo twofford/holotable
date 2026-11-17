@@ -3,6 +3,15 @@ import { type RenderToken, Renderer } from "../render/renderer";
 import { type Camera, type GridSpec, type ScreenPoint, type WorldPoint, fitCamera, screen, screenToWorld, worldToScreen } from "./coords";
 import type { LoadedMap } from "./loadUvtt";
 import { type PointerHandler, type PointerInfo, PanZoomController } from "./panZoom";
+import type { RenderDoor } from "../vision/doors";
+
+/** A fog picture to show over the map; bump `version` after repainting it. */
+export interface FogLayer {
+  readonly canvas: HTMLCanvasElement;
+  readonly width: number;
+  readonly height: number;
+  readonly version: number;
+}
 
 /** What a parent can ask the canvas to do, through a ref. */
 export interface MapCanvasHandle {
@@ -26,6 +35,9 @@ interface Props {
   onReady?: () => void;
   /** Tokens to draw, already in world pixels. */
   tokens?: readonly RenderToken[];
+  doors?: readonly RenderDoor[];
+  /** The fog of war, or `null` for none. */
+  fog?: FogLayer | null;
   /** Gets the first chance at each press, e.g. to drag a token. */
   pointerHandler?: PointerHandler | null;
   /** A tap or click that didn't pan or drag anything. */
@@ -45,7 +57,20 @@ interface Props {
  * The camera changes on every frame of a drag, so it lives in a ref, not in
  * React state: updating a ref doesn't re-render.
  */
-export function MapCanvas({ map, gridVisible, tokens, pointerHandler, onTap, onContextMenu, onZoom, onReady, children, ref }: Props) {
+export function MapCanvas({
+  map,
+  gridVisible,
+  tokens,
+  doors,
+  fog,
+  pointerHandler,
+  onTap,
+  onContextMenu,
+  onZoom,
+  onReady,
+  children,
+  ref,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const cameraRef = useRef<Camera>({ x: 0, y: 0, scale: 1 });
@@ -149,6 +174,14 @@ export function MapCanvas({ map, gridVisible, tokens, pointerHandler, onTap, onC
   useEffect(() => {
     if (ready) rendererRef.current?.setTokens(tokens ?? []);
   }, [tokens, ready]);
+
+  useEffect(() => {
+    if (ready) rendererRef.current?.setDoors(doors ?? []);
+  }, [doors, ready, map]);
+
+  useEffect(() => {
+    if (ready) rendererRef.current?.setFog(fog?.canvas ?? null, fog?.width, fog?.height);
+  }, [fog, ready, map]);
 
   return (
     <div className="map-host" ref={hostRef}>

@@ -1,4 +1,4 @@
-//! Integration tests for live scenes (M4), over real WebSocket connections.
+//! Integration tests for live scenes (M4, M5), over real WebSocket connections.
 //!
 //! Each test starts the app on a random local port and connects real clients.
 //! HTTP calls (sign-up, uploads) still go through `oneshot` on the same app, so
@@ -224,10 +224,13 @@ fn settings(name: &str, owner: Option<i64>, hidden: bool) -> TokenSettings {
         size: 1,
         owner_id: owner,
         hidden,
+        vision: true,
+        vision_range: None,
     }
 }
 
-/// GM and Vex in the scene, with Vex's token at (2, 2) in the shop.
+/// GM and Vex in the scene, with Vex's token at (3, 4) in the shop, just
+/// below the counter.
 async fn table_with_token() -> (Table, Client, Client, i64) {
     let tb = table().await;
     let mut gm = Client::connect(tb.addr, &tb.gm).await;
@@ -240,8 +243,8 @@ async fn table_with_token() -> (Table, Client, Client, i64) {
     let req = gm
         .op(SceneOp::CreateToken {
             settings: settings("Vex", Some(VEX_ID), false),
-            x: 2.0,
-            y: 2.0,
+            x: 3.0,
+            y: 4.0,
         })
         .await;
     let token_id = gm.ack(req).await.expect("new token id");
@@ -325,8 +328,8 @@ async fn permissions_are_checked_on_every_message() {
     let r = vex
         .op(SceneOp::MoveToken {
             token_id: thug,
-            x: 4.0,
-            y: 5.0,
+            x: 5.0,
+            y: 4.0,
         })
         .await;
     assert_eq!(vex.reject(r).await, RejectCode::Forbidden);
@@ -401,7 +404,7 @@ async fn players_never_receive_hidden_tokens() {
         .op(SceneOp::CreateToken {
             settings: settings("Ambusher", None, true),
             x: 6.0,
-            y: 4.0,
+            y: 5.0,
         })
         .await;
     let ambusher = gm.ack(r).await.unwrap();
@@ -409,7 +412,7 @@ async fn players_never_receive_hidden_tokens() {
         .op(SceneOp::MoveToken {
             token_id: ambusher,
             x: 5.0,
-            y: 4.0,
+            y: 5.0,
         })
         .await;
     gm.ack(r).await;
@@ -448,24 +451,24 @@ async fn players_never_receive_hidden_tokens() {
 
 #[tokio::test]
 async fn reconnecting_clients_catch_up() {
-    let (tb, mut gm, vex, token_id) = table_with_token().await;
-    let mut vex2 = Client::connect(tb.addr, &tb.vex).await;
-    vex2.join(tb.scene, None).await;
-    let (epoch, seq, _, _) = vex2.snapshot().await;
-    drop(vex2);
-    drop(vex);
+    let (tb, gm, mut vex, token_id) = table_with_token().await;
+    let mut gm2 = Client::connect(tb.addr, &tb.gm).await;
+    gm2.join(tb.scene, None).await;
+    let (epoch, seq, _, _) = gm2.snapshot().await;
+    drop(gm2);
+    drop(gm);
 
-    let r = gm
+    let r = vex
         .op(SceneOp::MoveToken {
             token_id,
             x: 3.0,
-            y: 3.0,
+            y: 5.0,
         })
         .await;
-    gm.ack(r).await;
+    vex.ack(r).await;
 
-    // Same epoch and a recent seq: only the missed event comes back.
-    let mut back = Client::connect(tb.addr, &tb.vex).await;
+    // A GM with the same epoch and a recent seq gets only the missed event.
+    let mut back = Client::connect(tb.addr, &tb.gm).await;
     back.join(
         tb.scene,
         Some(Resume {
@@ -479,12 +482,12 @@ async fn reconnecting_clients_catch_up() {
         SceneEvent::TokenMoved {
             token_id,
             x: 3.0,
-            y: 3.0
+            y: 5.0
         }
     );
 
     // An unknown epoch (say, after a server restart) gets a full snapshot.
-    let mut other = Client::connect(tb.addr, &tb.vex).await;
+    let mut other = Client::connect(tb.addr, &tb.gm).await;
     other
         .join(
             tb.scene,
@@ -495,7 +498,13 @@ async fn reconnecting_clients_catch_up() {
         )
         .await;
     let (_, _, _, tokens) = other.snapshot().await;
-    assert_eq!(tokens[0].x, 3.0);
+    assert_eq!(tokens[0].y, 5.0);
+
+    // Players always get a fresh snapshot of their own view.
+    let mut player = Client::connect(tb.addr, &tb.vex).await;
+    player.join(tb.scene, Some(Resume { epoch, seq })).await;
+    let (_, _, _, tokens) = player.snapshot().await;
+    assert_eq!(tokens[0].y, 5.0);
 }
 
 #[tokio::test]
@@ -608,6 +617,8 @@ async fn scene_changes_reach_the_room() {
         .json(json!({ "pixelsPerGrid": 35 }))
         .send(&tb.t.app)
         .await;
+    // Players get a fresh view first: the grid moved their tokens on the map.
+    vex.snapshot().await;
     assert!(matches!(
         vex.next().await,
         Some(ServerMsg::SceneChanged { .. })
@@ -712,4 +723,163 @@ async fn images_used_by_tokens_cannot_be_deleted() {
     assert_eq!(refused.status, StatusCode::CONFLICT);
     assert!(refused.body["message"].as_str().unwrap().contains("Bodega"));
     let _ = GM_ID;
+}
+
+#[tokio::test]
+async fn players_get_only_what_their_tokens_see() {
+    let (tb, mut gm, mut vex, vex_token) = table_with_token().await;
+
+    // A thug in the back room, behind the wall: Vex's player isn't told.
+    let r = gm
+        .op(SceneOp::CreateToken {
+            settings: settings("Thug", None, false),
+            x: 9.0,
+            y: 2.0,
+        })
+        .await;
+    let thug = gm.ack(r).await.unwrap();
+    vex.expect_silence().await;
+    // Asking about it gets the same answer as a made-up id.
+    let r = vex
+        .op(SceneOp::MoveToken {
+            token_id: thug,
+            x: 9.0,
+            y: 3.0,
+        })
+        .await;
+    assert_eq!(vex.reject(r).await, RejectCode::NotFound);
+    // The GM's drag of it isn't shown to the player either.
+    gm.send(&ClientMsg::Drag {
+        token_id: thug,
+        x: 9.0,
+        y: 3.0,
+    })
+    .await;
+    vex.expect_silence().await;
+
+    // It walks into the shop: it arrives for Vex's player, as a new token.
+    let r = gm
+        .op(SceneOp::MoveToken {
+            token_id: thug,
+            x: 5.0,
+            y: 4.0,
+        })
+        .await;
+    gm.ack(r).await;
+    match vex.event().await.1 {
+        SceneEvent::TokenCreated { token } => assert_eq!((token.id, token.x), (thug, 5.0)),
+        other => panic!("unexpected {other:?}"),
+    }
+    // And back out of sight: it's removed.
+    let r = gm
+        .op(SceneOp::MoveToken {
+            token_id: thug,
+            x: 9.0,
+            y: 2.0,
+        })
+        .await;
+    gm.ack(r).await;
+    assert_eq!(
+        vex.event().await.1,
+        SceneEvent::TokenRemoved { token_id: thug }
+    );
+
+    // A fresh snapshot has only Vex, and the explored fog.
+    let mut fresh = Client::connect(tb.addr, &tb.vex).await;
+    fresh.join(tb.scene, None).await;
+    match fresh.next().await {
+        Some(ServerMsg::SceneSnapshot {
+            tokens,
+            doors,
+            explored: Some(explored),
+            ..
+        }) => {
+            assert_eq!(tokens.len(), 1);
+            assert_eq!(tokens[0].id, vex_token);
+            assert_eq!(doors.len(), 4);
+            assert!(explored.cols > 0 && explored.bits.len() > 10);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    let saved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM scene_explored")
+        .fetch_one(&tb.t.db)
+        .await
+        .unwrap();
+    assert_eq!(saved, 1, "explored fog is saved");
+}
+
+#[tokio::test]
+async fn players_open_doors_next_to_their_tokens() {
+    let (_tb, mut gm, mut vex, vex_token) = table_with_token().await;
+    // Door 0 is the shop's front door, on the line y = 7 from x = 4 to 5.
+    let r = vex
+        .op(SceneOp::SetDoor {
+            door: 0,
+            open: true,
+        })
+        .await;
+    assert_eq!(vex.reject(r).await, RejectCode::Forbidden);
+
+    let r = vex
+        .op(SceneOp::MoveToken {
+            token_id: vex_token,
+            x: 4.0,
+            y: 6.0,
+        })
+        .await;
+    vex.ack(r).await;
+    gm.event().await;
+    let r = vex
+        .op(SceneOp::SetDoor {
+            door: 0,
+            open: true,
+        })
+        .await;
+    vex.ack(r).await;
+    let open = SceneEvent::DoorChanged {
+        door: 0,
+        open: true,
+        locked: false,
+    };
+    assert_eq!(gm.event().await.1, open);
+
+    // The GM locks it: the player can't close it now.
+    let r = gm
+        .op(SceneOp::LockDoor {
+            door: 0,
+            locked: true,
+        })
+        .await;
+    gm.ack(r).await;
+    let r = vex
+        .op(SceneOp::SetDoor {
+            door: 0,
+            open: false,
+        })
+        .await;
+    loop {
+        match vex.next().await {
+            Some(ServerMsg::Event { .. }) => continue,
+            Some(ServerMsg::Reject { req_id, code, .. }) if req_id == r => {
+                assert_eq!(code, RejectCode::Forbidden);
+                break;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let r = vex
+        .op(SceneOp::LockDoor {
+            door: 0,
+            locked: false,
+        })
+        .await;
+    assert_eq!(vex.reject(r).await, RejectCode::Forbidden);
+
+    // Door states are saved.
+    let (open, locked): (bool, bool) =
+        sqlx::query_as("SELECT open, locked FROM scene_doors WHERE door = 0")
+            .fetch_one(&_tb.t.db)
+            .await
+            .unwrap();
+    assert!(open && locked);
 }

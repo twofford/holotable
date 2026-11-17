@@ -20,6 +20,11 @@ export function TokenDialog({ campaignId, initial, members, onSave, onClose }: P
   const [size, setSize] = useState(initial?.size ?? 1);
   const [ownerId, setOwnerId] = useState<number | null>(initial?.ownerId ?? null);
   const [hidden, setHidden] = useState(initial?.hidden ?? false);
+  const [vision, setVision] = useState(initial?.vision ?? true);
+  // A text field, so it can be left empty for "unlimited".
+  const [range, setRange] = useState(initial?.visionRange == null ? "" : String(initial.visionRange));
+  const rangeFt = range.trim() === "" ? null : Number(range);
+  const rangeValid = rangeFt === null || (Number.isFinite(rangeFt) && rangeFt > 0 && rangeFt <= 1000);
   const [images, setImages] = useState<AssetInfo[]>([]);
 
   useEffect(() => {
@@ -45,7 +50,7 @@ export function TokenDialog({ campaignId, initial, members, onSave, onClose }: P
         aria-label={initial ? "Edit token" : "New token"}
         onSubmit={(e) => {
           e.preventDefault();
-          onSave({ name: name.trim(), assetId, size, ownerId, hidden });
+          onSave({ name: name.trim(), assetId, size, ownerId, hidden, vision, visionRange: rangeFt });
         }}
       >
         <h3>{initial ? "Edit token" : "New token"}</h3>
@@ -89,8 +94,18 @@ export function TokenDialog({ campaignId, initial, members, onSave, onClose }: P
           <input type="checkbox" checked={hidden} onChange={(e) => setHidden(e.target.checked)} />
           Hidden from players
         </label>
+        <label className="check">
+          <input type="checkbox" checked={vision} onChange={(e) => setVision(e.target.checked)} />
+          Can see (its owner sees what it sees)
+        </label>
+        {vision && (
+          <label>
+            Vision range in feet (empty: unlimited)
+            <input type="number" min={5} max={1000} step={5} value={range} onChange={(e) => setRange(e.target.value)} />
+          </label>
+        )}
         <div className="row-actions">
-          <button type="submit" disabled={!name.trim()}>
+          <button type="submit" disabled={!name.trim() || !rangeValid}>
             {initial ? "Save" : "Add token"}
           </button>
           <button type="button" className="secondary" onClick={onClose}>

@@ -4,8 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "wasm": "sh ../scripts/build-wasm.sh",
+    "predev": "npm run -s wasm",
     "dev": "vite",
+    "prebuild": "npm run -s wasm",
     "build": "tsc --noEmit && vite build",
+    "pretypecheck": "npm run -s wasm",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "test": "vitest run"

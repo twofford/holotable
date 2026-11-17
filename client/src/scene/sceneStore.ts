@@ -11,6 +11,7 @@
 // server says it is.
 
 import type { ClientMsg } from "../protocol/generated/ClientMsg";
+import type { DoorState } from "../protocol/generated/DoorState";
 import type { Role } from "../protocol/generated/Role";
 import type { SceneEvent } from "../protocol/generated/SceneEvent";
 import type { SceneOp } from "../protocol/generated/SceneOp";
@@ -33,10 +34,23 @@ export interface RemoteDrag {
   readonly at: number;
 }
 
+/** A player's explored fog: one bit per cell (see `vision::ExploredLayout`). */
+export interface ExploredFog {
+  readonly cell: number;
+  readonly cols: number;
+  readonly rows: number;
+  /** Changed in place as the player's tokens see more. */
+  readonly bits: Uint8Array;
+}
+
 export interface SceneView {
   readonly status: "joining" | "live" | "kicked";
   readonly role: Role | null;
   readonly tokens: readonly Token[];
+  /** Every door's state, by its index in the map's portals. */
+  readonly doors: readonly DoorState[];
+  /** Players only: what they've explored. `null` for GMs. */
+  readonly explored: ExploredFog | null;
   /** Tokens other people are dragging right now, by token id. */
   readonly dragging: ReadonlyMap<number, RemoteDrag>;
   readonly kicked: { reason: string; rejoin: boolean } | null;
@@ -48,7 +62,9 @@ type Pending =
   | { kind: "move"; tokenId: number; x: number; y: number }
   | { kind: "update"; tokenId: number; settings: TokenSettings }
   | { kind: "remove"; tokenId: number }
-  | { kind: "create" };
+  | { kind: "create" }
+  /** Doors and fog: shown when the server's event arrives, not before. */
+  | { kind: "other" };
 
 /** At most one drag update every 50 ms: 20 a second (SYN-006). */
 export const DRAG_INTERVAL_MS = 50;
@@ -73,6 +89,8 @@ export class SceneStore {
     status: "joining",
     role: null,
     tokens: [],
+    doors: [],
+    explored: null,
     dragging: new Map(),
     kicked: null,
     notice: null,
@@ -140,6 +158,18 @@ export class SceneStore {
     this.sendOp({ type: "deleteToken", tokenId }, { kind: "remove", tokenId });
   }
 
+  setDoor(door: number, open: boolean): void {
+    this.sendOp({ type: "setDoor", door, open }, { kind: "other" });
+  }
+
+  lockDoor(door: number, locked: boolean): void {
+    this.sendOp({ type: "lockDoor", door, locked }, { kind: "other" });
+  }
+
+  resetExplored(): void {
+    this.sendOp({ type: "resetExplored" }, { kind: "other" });
+  }
+
   /** Shows a token moving to others while it's dragged, at most every 50 ms. */
   drag(tokenId: number, x: number, y: number): void {
     this.queuedDrag = { tokenId, x, y };
@@ -188,7 +218,13 @@ export class SceneStore {
         this.confirmed = new Map(msg.tokens.map((t) => [t.id, t]));
         this.epoch = msg.epoch;
         this.seq = msg.seq;
-        this.set({ status: "live", role: msg.role, kicked: null });
+        this.set({
+          status: "live",
+          role: msg.role,
+          kicked: null,
+          doors: msg.doors,
+          explored: msg.explored ? { ...msg.explored, bits: decodeBase64(msg.explored.bits) } : null,
+        });
         this.refresh();
         break;
       case "event":
@@ -244,6 +280,17 @@ export class SceneStore {
         this.confirmed.delete(event.tokenId);
         this.dragging.delete(event.tokenId);
         break;
+      case "doorChanged": {
+        const doors = [...this.view.doors];
+        doors[event.door] = { open: event.open, locked: event.locked };
+        this.set({ doors });
+        break;
+      }
+      case "exploredReset": {
+        const e = this.view.explored;
+        if (e) this.set({ explored: { ...e, bits: new Uint8Array(e.bits.length) } });
+        break;
+      }
     }
   }
 
@@ -264,7 +311,7 @@ export class SceneStore {
     const tokens = new Map(this.confirmed);
     // Map iteration follows insertion order, so later requests win.
     for (const p of this.pending.values()) {
-      if (p.kind === "create") continue; // Shown once the server gives it an id.
+      if (p.kind === "create" || p.kind === "other") continue; // Shown once the server answers.
       const t = tokens.get(p.tokenId);
       if (!t) continue;
       if (p.kind === "move") tokens.set(t.id, { ...t, x: p.x, y: p.y });
@@ -278,4 +325,11 @@ export class SceneStore {
     this.view = { ...this.view, ...patch };
     for (const listener of this.listeners) listener();
   }
+}
+
+function decodeBase64(text: string): Uint8Array {
+  const raw = atob(text);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return bytes;
 }

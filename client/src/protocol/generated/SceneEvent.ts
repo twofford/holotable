@@ -5,4 +5,4 @@ import type { Token } from "./Token";
  * Something that happened to the scene. Sent to everyone in it, filtered per
  * person (players never see hidden tokens).
  */
-export type SceneEvent = { "type": "tokenCreated", token: Token, } | { "type": "tokenUpdated", token: Token, } | { "type": "tokenMoved", tokenId: number, x: number, y: number, } | { "type": "tokenRemoved", tokenId: number, };
+export type SceneEvent = { "type": "tokenCreated", token: Token, } | { "type": "tokenUpdated", token: Token, } | { "type": "tokenMoved", tokenId: number, x: number, y: number, } | { "type": "tokenRemoved", tokenId: number, } | { "type": "doorChanged", door: number, open: boolean, locked: boolean, } | { "type": "exploredReset" };

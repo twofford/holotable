@@ -4,4 +4,4 @@ import type { TokenSettings } from "./TokenSettings";
 /**
  * A request to change the scene. The server answers each with `Ack` or `Reject`.
  */
-export type SceneOp = { "type": "createToken", settings: TokenSettings, x: number, y: number, } | { "type": "moveToken", tokenId: number, x: number, y: number, } | { "type": "updateToken", tokenId: number, settings: TokenSettings, } | { "type": "deleteToken", tokenId: number, };
+export type SceneOp = { "type": "createToken", settings: TokenSettings, x: number, y: number, } | { "type": "moveToken", tokenId: number, x: number, y: number, } | { "type": "updateToken", tokenId: number, settings: TokenSettings, } | { "type": "deleteToken", tokenId: number, } | { "type": "setDoor", door: number, open: boolean, } | { "type": "lockDoor", door: number, locked: boolean, } | { "type": "resetExplored" };

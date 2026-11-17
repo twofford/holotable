@@ -23,4 +23,12 @@ ownerId: number | null,
 /**
  * Hidden tokens exist only for GMs: players are never sent them.
  */
-hidden: boolean, };
+hidden: boolean, 
+/**
+ * Whether the token can see (VIS-003). Its owner sees what it sees.
+ */
+vision: boolean, 
+/**
+ * How far it sees, in feet; `None` is unlimited.
+ */
+visionRange: number | null, };

@@ -10,3 +10,4 @@ pub mod geometry;
 pub mod protocol;
 pub mod scene;
 pub mod uvtt;
+pub mod vision;

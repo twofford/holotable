@@ -7,19 +7,24 @@
 //!
 //! For a change, the room: checks it (`holotable_core::scene::plan`), saves it
 //! to SQLite, applies it to the in-memory state (`apply`), gives it the next
-//! sequence number, and sends it to everyone in the room, filtered per person.
-//! Only then does the sender get its `Ack` (SYN-002, SYN-003, SYN-008).
+//! sequence number, and sends it to everyone in the room. Only then does the
+//! sender get its `Ack` (SYN-002, SYN-003, SYN-008).
+//!
+//! GMs get every event. Each player is told only about the tokens their own
+//! tokens can see (VIS-008): the room remembers which tokens each player knows
+//! about, works out the new set after every change, and sends the difference.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use holotable_core::{
     campaign::Role,
-    protocol::{Resume, ServerMsg},
+    protocol::{Explored, Resume, ServerMsg},
     scene::{
-        Actor, Applied, Change, RejectCode, Rejection, SceneOp, SceneRules, Token, Tokens, apply,
-        for_player, plan, visible_tokens,
+        Actor, Change, DoorState, RejectCode, Rejection, SceneEvent, SceneOp, SceneRules, Token,
+        Tokens, apply, explore, plan, player_events, visible_to,
     },
     uvtt::UvttMap,
+    vision::ExploredLayout,
 };
 use sqlx::SqlitePool;
 use tokio::sync::mpsc;
@@ -43,6 +48,8 @@ struct TokenRow {
     size: i64,
     owner_id: Option<i64>,
     hidden: bool,
+    vision: bool,
+    vision_range: Option<f64>,
 }
 
 impl From<TokenRow> for Token {
@@ -58,6 +65,8 @@ impl From<TokenRow> for Token {
             size,
             owner_id: r.owner_id,
             hidden: r.hidden,
+            vision: r.vision,
+            vision_range: r.vision_range,
         }
     }
 }
@@ -98,6 +107,9 @@ struct Member {
     user_id: i64,
     role: Role,
     outbox: Outbox,
+    /// For players: the tokens they currently know about. `None` for GMs,
+    /// who know about everything.
+    known: Option<BTreeSet<i64>>,
 }
 
 pub struct Room {
@@ -111,8 +123,13 @@ pub struct Room {
     tokens: Tokens,
     rules: SceneRules,
     members: HashMap<ConnId, Member>,
-    /// Recent events with their sequence numbers, oldest first.
-    log: VecDeque<(u64, Applied)>,
+    /// Recent events with their sequence numbers, oldest first. Only GMs
+    /// catch up from this; players get a fresh snapshot of their own view.
+    log: VecDeque<(u64, SceneEvent)>,
+    /// What each player in the room has explored, by user id, loaded when
+    /// they first join and saved whenever it grows.
+    explored: HashMap<i64, Vec<u8>>,
+    layout: ExploredLayout,
 }
 
 impl Room {
@@ -132,10 +149,19 @@ impl Room {
         let (campaign_id, asset_id, ppg, ox, oy, width, height) =
             row.ok_or_else(crate::error::not_found)?;
         let map = read_map(&storage, campaign_id, asset_id).await?;
-        let rules = SceneRules::new(&map, width, height, ppg, ox, oy);
+        let mut rules = SceneRules::new(&map, width, height, ppg, ox, oy);
+        let doors: Vec<(u32, bool, bool)> =
+            sqlx::query_as("SELECT door, open, locked FROM scene_doors WHERE scene_id = ?")
+                .bind(scene_id)
+                .fetch_all(&db)
+                .await?;
+        for (door, open, locked) in doors {
+            rules.set_door(door, DoorState { open, locked });
+        }
 
         let rows: Vec<TokenRow> = sqlx::query_as(
-            "SELECT id, name, asset_id, x, y, size, owner_id, hidden FROM tokens WHERE scene_id = ? ORDER BY id",
+            "SELECT id, name, asset_id, x, y, size, owner_id, hidden, vision, vision_range
+             FROM tokens WHERE scene_id = ? ORDER BY id",
         )
         .bind(scene_id)
         .fetch_all(&db)
@@ -150,9 +176,11 @@ impl Room {
             epoch: new_epoch(),
             seq: 0,
             tokens,
+            layout: ExploredLayout::for_map(rules.width, rules.height),
             rules,
             members: HashMap::new(),
             log: VecDeque::new(),
+            explored: HashMap::new(),
         })
     }
 
@@ -174,7 +202,7 @@ impl Room {
                     role,
                     outbox,
                     resume,
-                } => self.join(conn, user_id, role, outbox, resume),
+                } => self.join(conn, user_id, role, outbox, resume).await,
                 RoomCmd::Leave { conn } => {
                     self.members.remove(&conn);
                 }
@@ -200,7 +228,7 @@ impl Room {
         tracing::debug!(scene_id = self.scene_id, "room stopped");
     }
 
-    fn join(
+    async fn join(
         &mut self,
         conn: ConnId,
         user_id: i64,
@@ -208,36 +236,117 @@ impl Room {
         outbox: Outbox,
         resume: Option<Resume>,
     ) {
+        if role == Role::Gm {
+            let member = Member {
+                user_id,
+                role,
+                outbox,
+                known: None,
+            };
+            // Catch up from where the client left off, if this room still
+            // remembers everything since then; otherwise send a full snapshot.
+            let oldest = self.log.front().map_or(self.seq + 1, |(seq, _)| *seq);
+            match resume {
+                Some(r) if r.epoch == self.epoch && r.seq <= self.seq && r.seq + 1 >= oldest => {
+                    for (seq, event) in self.log.iter().filter(|(seq, _)| *seq > r.seq) {
+                        send(
+                            &member,
+                            ServerMsg::Event {
+                                seq: *seq,
+                                event: event.clone(),
+                            },
+                        );
+                    }
+                }
+                _ => {
+                    let tokens = self.tokens.values().cloned().collect();
+                    send(&member, self.snapshot(role, tokens, None));
+                }
+            }
+            self.members.insert(conn, member);
+            return;
+        }
+
+        // A player always gets a snapshot of what they can see right now.
+        self.load_explored(user_id).await;
+        self.explore(user_id).await;
+        let known = visible_to(&self.tokens, &self.rules, user_id);
+        let tokens = known
+            .iter()
+            .filter_map(|id| self.tokens.get(id))
+            .cloned()
+            .collect();
+        let explored = self
+            .explored
+            .get(&user_id)
+            .map(|bits| Explored::new(self.layout, bits));
         let member = Member {
             user_id,
             role,
             outbox,
+            known: Some(known),
         };
-        // Catch up from where the client left off, if this room still
-        // remembers everything since then; otherwise send a full snapshot.
-        let oldest = self.log.front().map_or(self.seq + 1, |(seq, _)| *seq);
-        match resume {
-            Some(r) if r.epoch == self.epoch && r.seq <= self.seq && r.seq + 1 >= oldest => {
-                for (seq, applied) in self.log.iter().filter(|(seq, _)| *seq > r.seq) {
-                    if let Some(event) = view(&member, applied) {
-                        send(&member, ServerMsg::Event { seq: *seq, event });
-                    }
-                }
-            }
-            _ => {
-                send(
-                    &member,
-                    ServerMsg::SceneSnapshot {
-                        scene_id: self.scene_id,
-                        epoch: self.epoch.clone(),
-                        seq: self.seq,
-                        role,
-                        tokens: visible_tokens(&self.tokens, role == Role::Gm),
-                    },
-                );
-            }
-        }
+        send(&member, self.snapshot(role, tokens, explored));
         self.members.insert(conn, member);
+    }
+
+    fn snapshot(&self, role: Role, tokens: Vec<Token>, explored: Option<Explored>) -> ServerMsg {
+        ServerMsg::SceneSnapshot {
+            scene_id: self.scene_id,
+            epoch: self.epoch.clone(),
+            seq: self.seq,
+            role,
+            tokens,
+            doors: self.rules.doors().to_vec(),
+            explored,
+        }
+    }
+
+    /// Reads a player's explored fog from the database, once per room.
+    async fn load_explored(&mut self, user_id: i64) {
+        if self.explored.contains_key(&user_id) {
+            return;
+        }
+        let saved: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT bits FROM scene_explored WHERE scene_id = ? AND user_id = ?",
+        )
+        .bind(self.scene_id)
+        .bind(user_id)
+        .fetch_optional(&self.db)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "loading explored fog failed");
+            None
+        });
+        let len = self.layout.byte_len();
+        // A saved value of the wrong size (the picture changed?) starts afresh.
+        let bits = saved
+            .filter(|b| b.len() == len)
+            .unwrap_or_else(|| vec![0; len]);
+        self.explored.insert(user_id, bits);
+    }
+
+    /// Adds what a player's tokens see now to their explored fog, and saves
+    /// it if it grew.
+    async fn explore(&mut self, user_id: i64) {
+        let Some(bits) = self.explored.get_mut(&user_id) else {
+            return;
+        };
+        if !explore(&self.tokens, &self.rules, user_id, self.layout, bits) {
+            return;
+        }
+        let result = sqlx::query(
+            "INSERT INTO scene_explored (scene_id, user_id, bits) VALUES (?, ?, ?)
+             ON CONFLICT (scene_id, user_id) DO UPDATE SET bits = excluded.bits",
+        )
+        .bind(self.scene_id)
+        .bind(user_id)
+        .bind(bits.as_slice())
+        .execute(&self.db)
+        .await;
+        if let Err(e) = result {
+            tracing::error!(error = %e, scene_id = self.scene_id, "saving explored fog failed");
+        }
     }
 
     async fn op(&mut self, conn: ConnId, req_id: u32, op: SceneOp) {
@@ -248,6 +357,27 @@ impl Room {
             user_id: member.user_id,
             is_gm: member.role == Role::Gm,
         };
+        // To a player, a token they can't see doesn't exist: the same answer
+        // as for a made-up id, so probing ids reveals nothing.
+        let token_id = match &op {
+            SceneOp::MoveToken { token_id, .. }
+            | SceneOp::UpdateToken { token_id, .. }
+            | SceneOp::DeleteToken { token_id } => Some(*token_id),
+            _ => None,
+        };
+        if let (Some(known), Some(id)) = (&member.known, token_id)
+            && !known.contains(&id)
+        {
+            send(
+                member,
+                ServerMsg::Reject {
+                    req_id,
+                    code: RejectCode::NotFound,
+                    message: "That token isn't on this scene.".into(),
+                },
+            );
+            return;
+        }
         match self.try_op(actor, &op).await {
             Ok((seq, token_id)) => {
                 if let Some(m) = self.members.get(&conn) {
@@ -301,10 +431,11 @@ impl Room {
             Change::Create(t) => Some(t.id),
             _ => None,
         };
-        let applied = apply(&mut self.tokens, change);
+        let event = apply(&mut self.tokens, &mut self.rules, change);
         self.seq += 1;
-        self.broadcast(self.seq, &applied);
-        self.log.push_back((self.seq, applied));
+        self.after_change(&event).await;
+        self.broadcast(self.seq, &event);
+        self.log.push_back((self.seq, event));
         if self.log.len() > EVENT_LOG_LEN {
             self.log.pop_front();
         }
@@ -352,13 +483,49 @@ impl Room {
         Ok(())
     }
 
+    /// Updates explored fog after a change: for players whose tokens moved or
+    /// changed, or for everyone when a door changed or the GM reset it.
+    async fn after_change(&mut self, event: &SceneEvent) {
+        let players: BTreeSet<i64> = self
+            .members
+            .values()
+            .filter(|m| m.role != Role::Gm)
+            .map(|m| m.user_id)
+            .collect();
+        let affected: Vec<i64> = match event {
+            SceneEvent::ExploredReset => {
+                for bits in self.explored.values_mut() {
+                    bits.fill(0);
+                }
+                players.into_iter().collect()
+            }
+            SceneEvent::DoorChanged { .. } => players.into_iter().collect(),
+            SceneEvent::TokenCreated { token } | SceneEvent::TokenUpdated { token } => token
+                .owner_id
+                .into_iter()
+                .filter(|o| players.contains(o))
+                .collect(),
+            SceneEvent::TokenMoved { token_id, .. } => self
+                .tokens
+                .get(token_id)
+                .and_then(|t| t.owner_id)
+                .into_iter()
+                .filter(|o| players.contains(o))
+                .collect(),
+            SceneEvent::TokenRemoved { .. } => Vec::new(),
+        };
+        for user_id in affected {
+            self.explore(user_id).await;
+        }
+    }
+
     /// Writes a change to the database. A new token gets its id here.
     async fn save(&self, change: Change) -> Result<Change, sqlx::Error> {
         Ok(match change {
             Change::Create(mut t) => {
                 t.id = sqlx::query(
-                    "INSERT INTO tokens (scene_id, name, asset_id, x, y, size, owner_id, hidden, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO tokens (scene_id, name, asset_id, x, y, size, owner_id, hidden, vision, vision_range, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(self.scene_id)
                 .bind(&t.name)
@@ -368,6 +535,8 @@ impl Room {
                 .bind(i64::from(t.size))
                 .bind(t.owner_id)
                 .bind(t.hidden)
+                .bind(t.vision)
+                .bind(t.vision_range)
                 .bind(db::now())
                 .execute(&self.db)
                 .await?
@@ -375,12 +544,14 @@ impl Room {
                 Change::Create(t)
             }
             Change::Update(t) => {
-                sqlx::query("UPDATE tokens SET name = ?, asset_id = ?, size = ?, owner_id = ?, hidden = ? WHERE id = ? AND scene_id = ?")
+                sqlx::query("UPDATE tokens SET name = ?, asset_id = ?, size = ?, owner_id = ?, hidden = ?, vision = ?, vision_range = ? WHERE id = ? AND scene_id = ?")
                     .bind(&t.name)
                     .bind(t.asset_id)
                     .bind(i64::from(t.size))
                     .bind(t.owner_id)
                     .bind(t.hidden)
+                    .bind(t.vision)
+                    .bind(t.vision_range)
                     .bind(t.id)
                     .bind(self.scene_id)
                     .execute(&self.db)
@@ -405,17 +576,47 @@ impl Room {
                     .await?;
                 Change::Remove { token_id }
             }
+            Change::Door { door, state } => {
+                sqlx::query(
+                    "INSERT INTO scene_doors (scene_id, door, open, locked) VALUES (?, ?, ?, ?)
+                     ON CONFLICT (scene_id, door) DO UPDATE SET open = excluded.open, locked = excluded.locked",
+                )
+                .bind(self.scene_id)
+                .bind(door)
+                .bind(state.open)
+                .bind(state.locked)
+                .execute(&self.db)
+                .await?;
+                Change::Door { door, state }
+            }
+            Change::ResetExplored => {
+                sqlx::query("DELETE FROM scene_explored WHERE scene_id = ?")
+                    .bind(self.scene_id)
+                    .execute(&self.db)
+                    .await?;
+                Change::ResetExplored
+            }
         })
     }
 
     /// Sends an event to everyone, as each person may see it.
-    fn broadcast(&mut self, seq: u64, applied: &Applied) {
+    fn broadcast(&mut self, seq: u64, event: &SceneEvent) {
         let mut stalled = Vec::new();
-        for (conn, member) in &self.members {
-            if let Some(event) = view(member, applied)
-                && !send(member, ServerMsg::Event { seq, event })
-            {
-                stalled.push(*conn);
+        for (conn, member) in &mut self.members {
+            let events = match &mut member.known {
+                None => vec![event.clone()],
+                Some(known) => {
+                    let now = visible_to(&self.tokens, &self.rules, member.user_id);
+                    let events = player_events(known, &now, &self.tokens, event);
+                    *known = now;
+                    events
+                }
+            };
+            for event in events {
+                if !send(member, ServerMsg::Event { seq, event }) {
+                    stalled.push(*conn);
+                    break;
+                }
             }
         }
         // A client that can't keep up has missed an event and is out of date.
@@ -457,11 +658,36 @@ impl Room {
             y,
             user_id: member.user_id,
         };
+        // Players see the drag only if they know the token and could see it
+        // where it is now.
+        let at = Token {
+            x,
+            y,
+            ..token.clone()
+        };
         for (other, m) in &self.members {
-            if *other != conn && (m.role == Role::Gm || !token.hidden) {
+            if *other == conn {
+                continue;
+            }
+            let shown = match &m.known {
+                None => true,
+                Some(known) => {
+                    known.contains(&token_id)
+                        && (token.owner_id == Some(m.user_id) || self.player_sees(m.user_id, &at))
+                }
+            };
+            if shown {
                 send(m, msg.clone());
             }
         }
+    }
+
+    /// Can any of a player's seeing tokens see `target`?
+    fn player_sees(&self, user_id: i64, target: &Token) -> bool {
+        self.tokens
+            .values()
+            .filter(|t| t.owner_id == Some(user_id) && !t.hidden && t.vision)
+            .any(|eye| self.rules.sees(eye, target))
     }
 
     /// Reloads the scene's grid from the database and tells everyone.
@@ -469,6 +695,31 @@ impl Room {
         match Room::load(self.db.clone(), self.storage.clone(), self.scene_id).await {
             Ok(fresh) => {
                 self.rules = fresh.rules;
+                // The grid moved, so tokens sit in different places on the
+                // picture and players may see different things: send each
+                // player a fresh view.
+                let mut snapshots = Vec::new();
+                for (conn, m) in &self.members {
+                    if m.known.is_some() {
+                        let known = visible_to(&self.tokens, &self.rules, m.user_id);
+                        let tokens = known
+                            .iter()
+                            .filter_map(|id| self.tokens.get(id))
+                            .cloned()
+                            .collect();
+                        let explored = self
+                            .explored
+                            .get(&m.user_id)
+                            .map(|b| Explored::new(self.layout, b));
+                        snapshots.push((*conn, known, self.snapshot(m.role, tokens, explored)));
+                    }
+                }
+                for (conn, known, msg) in snapshots {
+                    if let Some(m) = self.members.get_mut(&conn) {
+                        m.known = Some(known);
+                        send(m, msg);
+                    }
+                }
                 for m in self.members.values() {
                     send(
                         m,
@@ -480,15 +731,6 @@ impl Room {
             }
             Err(e) => tracing::error!(error = %e, scene_id = self.scene_id, "room reload failed"),
         }
-    }
-}
-
-/// What one member sees of an event.
-fn view(member: &Member, applied: &Applied) -> Option<holotable_core::scene::SceneEvent> {
-    if member.role == Role::Gm {
-        Some(applied.event.clone())
-    } else {
-        for_player(applied)
     }
 }
 
