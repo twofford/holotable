@@ -1,0 +1,82 @@
+schema: uvtt-scene/v1
+name: large-arcology
+map_size: [80, 60]
+pixels_per_grid: 70
+
+rooms:
+  - id: plaza
+    label: Undercity Plaza
+    shape: irregular
+    smoothing: organic
+    boundary: [[28, 20], [40, 16], [52, 20], [56, 30], [52, 40], [40, 44], [28, 40], [24, 30]]
+    holes:
+      - boundary: [[38, 28], [42, 28], [42, 32], [38, 32]]
+  - {id: noodle, label: Noodle Bar, bounds: [4, 4, 10, 8]}
+  - {id: clinic, label: Ripperdoc Clinic, bounds: [4, 20, 10, 10]}
+  - {id: ward, label: Recovery Ward, bounds: [4, 30, 10, 6]}
+  - {id: market, label: Night Market, bounds: [4, 44, 16, 12]}
+  - {id: lobby, label: Tower Lobby, bounds: [34, 2, 12, 8]}
+  - {id: security, label: Security Office, bounds: [50, 3, 8, 6]}
+  - id: shrine
+    label: Data Shrine
+    shape: circle
+    bounds: [66, 11, 9, 9]
+  - {id: garage, label: Parking Garage, bounds: [62, 22, 14, 16]}
+  - {id: club, label: Club Neon, bounds: [36, 50, 18, 8]}
+  - {id: backstage, label: Backstage, bounds: [54, 50, 6, 8]}
+  - id: tunnels
+    label: Maintenance Tunnels
+    shape: oval
+    bounds: [64, 44, 12, 8]
+  - {id: catwalk, label: Catwalk, bounds: [20, 4, 8, 4]}
+
+connections:
+  - {from: noodle, to: catwalk, stairs: {direction: up, style: ladder}}
+  - {from: clinic, to: ward}
+  - {from: noodle, to: clinic}
+  - {from: lobby, to: security}
+  - {from: lobby, to: plaza, path: [[40, 9.5], [40, 13], [40, 18]], width: 3}
+  - {from: clinic, to: plaza, path: [[13.5, 25], [19, 26], [26, 28]], width: 2}
+  - {from: market, to: plaza, path: [[19.5, 46], [24, 43], [30, 39]], width: 2.5}
+  - {from: garage, to: plaza, path: [[62.5, 30], [58, 30], [54, 30]], width: 4}
+  - {from: club, to: plaza, path: [[45, 50.5], [44, 47], [42, 42]], width: 2}
+  - {from: club, to: backstage}
+  - {from: security, to: shrine, diagonal: true}
+  - {from: garage, to: tunnels}
+  - {from: backstage, to: tunnels, secret: true}
+
+objects:
+  - {id: bar-counter, bounds: [6, 6, 6, 1]}
+  - {id: surgery-table, bounds: [8, 24, 2, 3]}
+  - {id: stall-1, bounds: [6, 47, 2, 2]}
+  - {id: stall-2, bounds: [10, 47, 2, 2]}
+  - {id: stall-3, bounds: [14, 47, 2, 2]}
+  - {id: stall-4, bounds: [6, 52, 2, 2]}
+  - {id: stall-5, bounds: [10, 52, 2, 2]}
+  - {id: stage, bounds: [42, 53, 6, 3]}
+  - {id: car-1, bounds: [65, 25, 2, 4]}
+  - {id: car-2, bounds: [69, 25, 2, 4]}
+  - {id: car-3, bounds: [65, 32, 2, 4]}
+  - {id: pillar-1, bounds: [73, 28, 1, 1]}
+  - {id: reception, bounds: [38, 4, 4, 1]}
+
+features:
+  - {id: lift, kind: shaft, bounds: [44, 7, 1, 1]}
+  - {id: drain, kind: hatch, bounds: [70, 47, 1, 1]}
+
+lights:
+  - {position: [9, 8], range: 6, intensity: 1, color: "ff4fa8ff", shadows: true}
+  - {position: [9, 25], range: 6, intensity: 1, color: "e8fbffff", shadows: true}
+  - {position: [12, 50], range: 8, intensity: 1, color: "ffb347ff", shadows: true}
+  - {position: [40, 24], range: 10, intensity: 0.8, color: "00e5ffff", shadows: true}
+  - {position: [40, 37], range: 10, intensity: 0.8, color: "b04dffff", shadows: true}
+  - {position: [40, 6], range: 6, intensity: 1, color: "ffffffff", shadows: true}
+  - {position: [70.5, 15.5], range: 5, intensity: 1, color: "39ff88ff", shadows: true}
+  - {position: [45, 54], range: 9, intensity: 1.2, color: "ff2bd6ff", shadows: true}
+  - {position: [69, 30], range: 7, intensity: 0.5, color: "ffd27aff", shadows: true}
+
+environment:
+  ambient_light: "141428ff"
+
+render:
+  floor_grid_width: 0.015

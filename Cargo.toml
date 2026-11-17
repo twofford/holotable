@@ -11,6 +11,15 @@ license = "MIT"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ts-rs = "12"
+thiserror = "2"
+base64 = "0.23"
+
+# Optimize dependencies, but not our own crates, in dev builds. Password
+# hashing and image decoding are ten times slower unoptimized, which would make
+# `cargo run` and `cargo test` crawl. Our code stays quick to compile and easy
+# to debug. The first build takes longer; later ones don't.
+[profile.dev.package."*"]
+opt-level = 2
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

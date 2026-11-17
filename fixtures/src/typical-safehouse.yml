@@ -1,0 +1,41 @@
+schema: uvtt-scene/v1
+name: typical-safehouse
+map_size: [32, 22]
+pixels_per_grid: 70
+
+rooms:
+  - {id: stairwell, label: Stairwell, bounds: [1, 9, 4, 4]}
+  - {id: hall, label: Hallway, bounds: [8, 9, 12, 3]}
+  - {id: living, label: Living Room, bounds: [8, 1, 8, 7], walls: {north: glass}}
+  - {id: kitchen, label: Kitchen, bounds: [16, 1, 5, 7]}
+  - {id: server, label: Server Closet, bounds: [23, 2, 4, 4]}
+  - {id: bedroom, label: Bedroom, bounds: [8, 13, 6, 6]}
+  - {id: bath, label: Bath, bounds: [14, 13, 3, 4]}
+  - {id: armory, label: Hidden Armory, bounds: [23, 13, 6, 5]}
+
+connections:
+  - {from: stairwell, to: hall}
+  - {from: hall, to: living, opening: true}
+  - {from: living, to: kitchen, opening: true}
+  - {from: kitchen, to: server, door: {closed: true, freestanding: false}}
+  - {from: hall, to: bedroom}
+  - {from: bedroom, to: bath, door: {closed: false, freestanding: false}}
+  - {from: hall, to: armory, secret: true}
+
+objects:
+  - {id: couch, bounds: [10, 4, 3, 1]}
+  - {id: fridge, bounds: [19, 2, 1, 1]}
+  - {id: rack-a, bounds: [24, 3, 1, 2]}
+  - {id: rack-b, bounds: [26, 3, 1, 2]}
+  - {id: bed, bounds: [9, 14, 2, 3]}
+  - {id: crates, bounds: [27, 14, 1, 3]}
+
+lights:
+  - {position: [12.0, 4.5], range: 5, intensity: 1, color: "ff7ad9ff", shadows: true}
+  - {position: [18.5, 4.5], range: 4, intensity: 1, color: "fff2d0ff", shadows: true}
+  - {position: [25.0, 4.0], range: 3, intensity: 0.8, color: "40ff9aff", shadows: true}
+  - {position: [14.0, 10.5], range: 4, intensity: 0.6, color: "ffd27aff", shadows: true}
+  - {position: [26.0, 15.5], range: 4, intensity: 1, color: "ff4040ff", shadows: true}
+
+environment:
+  ambient_light: "202036ff"

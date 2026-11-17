@@ -1,8 +1,8 @@
 // The client's WebSocket connection.
 //
-// This is a plain class, not a React component. React only reads snapshots of its
-// state (see `useConnection` in App.tsx). Later the map canvas will read the same
-// connection without going through React at all.
+// This is a plain class, not a React component. React reads snapshots of its
+// state (see `useConnection` in App.tsx); scene code subscribes to its messages
+// directly (see `scene/sceneStore.ts`), without going through React at all.
 
 import type { ClientMsg } from "../protocol/generated/ClientMsg";
 import type { ServerMsg } from "../protocol/generated/ServerMsg";
@@ -25,16 +25,25 @@ export interface ConnectionState {
   readonly log: readonly LogEntry[];
 }
 
+type MessageListener = (msg: ServerMsg) => void;
+
 const MAX_LOG = 50;
-const RECONNECT_MS = 2000;
+/** Reconnect delays: 1 s, doubling up to 10 s, with some randomness (SYN-007). */
+const RECONNECT_FIRST_MS = 1000;
+const RECONNECT_MAX_MS = 10_000;
+/** Message types too frequent to be worth showing in the connection log. */
+const UNLOGGED = new Set(["drag", "tokenDragging"]);
 
 export class Connection {
   private socket: WebSocket | null = null;
   private listeners = new Set<() => void>();
+  private messageListeners = new Set<MessageListener>();
+  private openListeners = new Set<() => void>();
   private nextNonce = 1;
   private nextLogId = 1;
   private pendingPings = new Map<number, number>(); // nonce -> performance.now()
   private reconnectTimer: number | undefined;
+  private reconnectDelay = RECONNECT_FIRST_MS;
   private stopped = false;
 
   private state: ConnectionState = {
@@ -60,6 +69,33 @@ export class Connection {
   };
 
   getSnapshot = (): ConnectionState => this.state;
+
+  // --- For code that talks to the server over this connection ---
+
+  /** Calls `listener` with every message from the server. Returns an unsubscribe function. */
+  onMessage(listener: MessageListener): () => void {
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
+  }
+
+  /** Calls `listener` each time the connection (re)opens, e.g. to rejoin a scene. */
+  onOpen(listener: () => void): () => void {
+    this.openListeners.add(listener);
+    return () => this.openListeners.delete(listener);
+  }
+
+  get isOpen(): boolean {
+    return this.socket?.readyState === WebSocket.OPEN;
+  }
+
+  /** Sends a message if the connection is open. Returns whether it was sent. */
+  send(msg: ClientMsg): boolean {
+    if (this.socket?.readyState !== WebSocket.OPEN) return false;
+    const text = JSON.stringify(msg);
+    this.socket.send(text);
+    if (!UNLOGGED.has(msg.type)) this.addLog("out", text);
+    return true;
+  }
 
   // --- Lifecycle ---
 
@@ -88,7 +124,11 @@ export class Connection {
     const socket = new WebSocket(this.url);
     this.socket = socket;
 
-    socket.addEventListener("open", () => this.update({ status: "open" }));
+    socket.addEventListener("open", () => {
+      this.reconnectDelay = RECONNECT_FIRST_MS;
+      this.update({ status: "open" });
+      for (const listener of this.openListeners) listener();
+    });
     socket.addEventListener("message", (event) => this.receive(event.data));
     socket.addEventListener("close", () => {
       if (this.socket !== socket) return; // An old socket we already replaced.
@@ -96,21 +136,17 @@ export class Connection {
       this.pendingPings.clear();
       this.update({ status: "closed" });
       if (!this.stopped) {
-        this.reconnectTimer = window.setTimeout(() => this.open(), RECONNECT_MS);
+        // Back off, so a server that's down isn't hammered by every client at
+        // once. The random part spreads clients out after a restart.
+        const delay = this.reconnectDelay * (0.75 + Math.random() * 0.5);
+        this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
+        this.reconnectTimer = window.setTimeout(() => this.open(), delay);
       }
     });
   }
 
-  private send(msg: ClientMsg): void {
-    if (this.socket?.readyState !== WebSocket.OPEN) return;
-    const text = JSON.stringify(msg);
-    this.socket.send(text);
-    this.addLog("out", text);
-  }
-
   private receive(data: unknown): void {
     if (typeof data !== "string") return;
-    this.addLog("in", data);
 
     // The server is trusted to send valid ServerMsg JSON: its types are generated
     // from the same Rust enum. A parse error still must not crash the client.
@@ -120,6 +156,7 @@ export class Connection {
     } catch {
       return;
     }
+    if (!UNLOGGED.has(msg.type)) this.addLog("in", data);
 
     // `msg.type` narrows the union: inside each case, TypeScript knows which
     // fields exist.
@@ -141,6 +178,16 @@ export class Connection {
       case "error":
         console.warn("server error:", msg.message);
         break;
+      // Scene messages: handled by the listeners below (the scene store).
+      case "sceneSnapshot":
+      case "event":
+      case "ack":
+      case "reject":
+      case "tokenDragging":
+      case "kicked":
+      case "sceneChanged":
+      case "activeScene":
+        break;
       default: {
         // If a new variant is added in Rust and not handled here, this line
         // stops compiling: `msg` would no longer be `never`.
@@ -148,6 +195,7 @@ export class Connection {
         console.warn("unknown message", unhandled);
       }
     }
+    for (const listener of this.messageListeners) listener(msg);
   }
 
   private addLog(direction: LogEntry["direction"], text: string): void {

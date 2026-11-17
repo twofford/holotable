@@ -1,0 +1,35 @@
+schema: uvtt-scene/v1
+name: small-bodega
+map_size: [12, 10]
+pixels_per_grid: 70
+
+rooms:
+  - id: street
+    label: Sidewalk
+    bounds: [1, 7, 10, 2]
+    walls: open
+    floor: "6b6f78"
+  - id: shop
+    label: Bodega
+    bounds: [1, 1, 7, 6]
+    walls: {south: glass}
+  - id: back
+    label: Back Room
+    bounds: [8, 1, 3, 4]
+
+connections:
+  - {from: shop, to: street}
+  - {from: shop, to: back}
+
+objects:
+  - {id: counter, bounds: [2, 2, 3, 1]}
+
+lights:
+  - {position: [4.5, 4.0], range: 6, intensity: 1, color: "9af0ffff", shadows: true}
+
+environment:
+  ambient_light: "303048ff"
+
+render:
+  background: "15171c"
+  edge: "c8c8c880"

@@ -7,9 +7,17 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   server: {
+    // The sample maps live in ../fixtures, outside the client folder. Vite's
+    // dev server only serves files it's allowed to; let it read the repo root.
+    fs: { allow: [".."] },
+    // `changeOrigin: false` keeps the browser's Host header (localhost:5173)
+    // when forwarding. The server refuses requests whose Origin doesn't match
+    // Host (see crates/server/src/origin.rs), so the two must agree. Vite's
+    // short form, `"/api": "http://..."`, sets changeOrigin to true and would
+    // break sign-in, so both rules are written out in full.
     proxy: {
-      "/api": "http://127.0.0.1:3000",
-      "/ws": { target: "ws://127.0.0.1:3000", ws: true },
+      "/api": { target: "http://127.0.0.1:3000", changeOrigin: false },
+      "/ws": { target: "ws://127.0.0.1:3000", ws: true, changeOrigin: false },
     },
   },
 });

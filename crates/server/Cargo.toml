@@ -5,6 +5,9 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "holotable"
 path = "src/main.rs"
@@ -12,11 +15,28 @@ path = "src/main.rs"
 [dependencies]
 holotable-core = { path = "../core" }
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_json.workspace = true
+thiserror.workspace = true
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+argon2 = "0.6"
+axum-extra = { version = "0.12", features = ["cookie"] }
+sha2 = "0.11"
+getrandom = "0.4"
+hex = "0.4"
+serde = { workspace = true, features = ["derive"] }
+time = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tokio-tungstenite = "0.29"
+tower = { version = "0.5", features = ["util"] }

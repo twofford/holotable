@@ -4,24 +4,164 @@
   background: #0d0f14;
   color: #e6e8ee;
 }
-body { margin: 0; }
-.app { max-width: 720px; margin: 0 auto; padding: 24px 16px; }
-header { display: flex; align-items: center; gap: 12px; }
-h1 { margin: 0; font-size: 28px; letter-spacing: 0.02em; }
-h2 { margin-top: 0; font-size: 16px; }
+html, body, #root { height: 100%; margin: 0; }
+/* dvh follows the visible height on iPad as Safari's toolbars show and hide. */
+.app { display: flex; flex-direction: column; height: 100dvh; }
+
+header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 16px; border-bottom: 1px solid #222734;
+}
+h1 { margin: 0; font-size: 20px; letter-spacing: 0.02em; }
+h1 a { color: inherit; text-decoration: none; }
+a { color: #4fd8e8; }
+a.button, a.button:visited { color: #031216; text-decoration: none; }
+a.button.secondary { color: #e6e8ee; background: #232836; }
+
+/* Pages: campaign list, campaign, invite */
+.page { flex: 1; overflow: auto; padding: 24px 16px 48px; max-width: 880px; width: 100%; margin: 0 auto; box-sizing: border-box; }
+.page.narrow { max-width: 480px; }
+.page h2 { display: flex; align-items: center; gap: 12px; margin: 8px 0 16px; }
+.page h3 { margin: 0 0 12px; font-size: 16px; }
+.panel-section { margin: 16px 0; padding: 16px; border-radius: 12px; background: #161a22; display: grid; gap: 12px; justify-items: start; }
+.cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.card {
+  display: flex; align-items: center; justify-content: space-between; min-height: 56px;
+  padding: 0 16px; border-radius: 12px; background: #161a22; color: #e6e8ee; text-decoration: none;
+}
+.card:hover { background: #1c212b; }
+.rows { list-style: none; margin: 0; padding: 0; width: 100%; }
+.rows li {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 48px; border-bottom: 1px solid #222734;
+}
+.rows li a { min-height: 44px; display: inline-flex; align-items: center; }
+.row-actions { display: flex; gap: 8px; align-items: center; }
+.badge { padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: #2a2e38; }
+.role-gm { background: #3b2a5c; color: #d8c2ff; }
+.role-player { background: #1e3a44; color: #9fe6f2; }
+.inline-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; width: 100%; }
+.inline-form input:not([type="number"]) { flex: 1; min-width: 200px; }
+.inline-form input[type="number"] { width: 80px; }
+.inline-form .form-error { flex-basis: 100%; }
+select {
+  min-height: 44px; padding: 0 10px; border: 1px solid #2c3242; border-radius: 10px;
+  background: #0d0f14; color: #e6e8ee; font: inherit; font-size: 16px;
+}
+button.small { min-height: 44px; padding: 0 12px; font-size: 14px; }
+button.danger { background: #8a2232; color: #ffe6ea; }
+.invite-link { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; align-items: center; }
+.invite-link p { flex-basis: 100%; }
+.invite-link input { flex: 1; min-width: 240px; font-size: 14px; }
+.center { text-align: center; }
+.spacer { flex: 1; }
+
 .status { padding: 4px 10px; border-radius: 999px; font-size: 13px; background: #2a2e38; }
 .status-open { background: #12432f; color: #7ef0b5; }
 .status-connecting { background: #4a3b10; color: #ffd36b; }
 .status-closed { background: #4a1620; color: #ff8a9a; }
-.panel { margin-top: 16px; padding: 16px; border-radius: 12px; background: #161a22; }
-button {
-  min-height: 44px; min-width: 44px; padding: 0 18px; border: 0; border-radius: 10px;
-  background: #00b3c7; color: #031216; font-size: 16px; font-weight: 600;
+
+/* Header drop-down menus (<details>): connection status and account. */
+.menu { position: relative; }
+.menu summary { list-style: none; cursor: pointer; min-height: 44px; display: flex; align-items: center; }
+.menu summary::-webkit-details-marker { display: none; }
+.menu-button { padding: 0 12px; border-radius: 10px; }
+.menu-button:hover { background: #1a1e28; }
+.menu .panel {
+  position: absolute; right: 0; top: 48px; z-index: 10; width: min(420px, 90vw);
+  padding: 16px; border-radius: 12px; background: #161a22; box-shadow: 0 8px 24px #0008;
 }
-button:disabled { opacity: 0.4; }
-.hint { color: #8a90a0; font-size: 14px; }
-.log { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow: auto; }
+.panel.account { display: grid; gap: 16px; }
+.panel.account form { display: grid; gap: 8px; }
+.muted { margin: 0; color: #8a90a0; }
+
+/* Forms */
+label { display: grid; gap: 6px; font-size: 14px; color: #c4c9d6; }
+input {
+  min-height: 44px; padding: 0 12px; border: 1px solid #2c3242; border-radius: 10px;
+  background: #0d0f14; color: #e6e8ee; font: inherit; font-size: 16px; /* 16px stops iOS zooming in on focus */
+}
+input:focus { outline: 2px solid #00b3c7; outline-offset: 1px; }
+.hint { margin: 0; font-size: 13px; color: #8a90a0; }
+.form-error { margin: 0; color: #ff8a9a; }
+
+.splash { display: grid; place-items: center; height: 100dvh; color: #8a90a0; font-size: 20px; }
+.auth-screen { display: grid; place-items: center; min-height: 100dvh; padding: 16px; box-sizing: border-box; }
+.auth-card {
+  display: grid; gap: 16px; width: min(380px, 100%);
+  padding: 24px; border-radius: 16px; background: #161a22;
+}
+.auth-card h1 { font-size: 26px; text-align: center; }
+.tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border-radius: 12px; background: #0d0f14; }
+.tabs button { background: transparent; color: #8a90a0; }
+.tabs button[aria-selected="true"] { background: #232836; color: #e6e8ee; }
+
+/* Every control is at least 44 x 44 pt, Apple's minimum touch target (NFR-012). */
+button, .button {
+  min-height: 44px; min-width: 44px; padding: 0 16px; border: 0; border-radius: 10px;
+  background: #00b3c7; color: #031216; font: inherit; font-size: 15px; font-weight: 600;
+  display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+}
+button.secondary { background: #232836; color: #e6e8ee; }
+button:disabled, .button.disabled { opacity: 0.4; cursor: default; }
+.button input { display: none; }
+
+.log { list-style: none; margin: 12px 0 0; padding: 0; max-height: 40vh; overflow: auto; }
 .log li { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid #222734; }
-.log code { font-size: 13px; word-break: break-all; }
+.log code { font-size: 12px; word-break: break-all; }
 .log-in .arrow { color: #7ef0b5; }
 .log-out .arrow { color: #00b3c7; }
+
+.map-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.map-area { position: relative; flex: 1; min-height: 0; display: flex; }
+.map-area > .map-host { flex: 1; }
+.scene-title { font-size: 16px; }
+.grid-settings label { display: flex; align-items: center; gap: 6px; }
+.grid-settings input { width: 90px; }
+.toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 16px; border-bottom: 1px solid #222734;
+}
+.zoom { min-width: 56px; text-align: right; font-variant-numeric: tabular-nums; color: #8a90a0; }
+
+.map-host { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.map-canvas {
+  display: block;
+  /* The browser must not pan, zoom or select anything here: our code handles all
+     touch input (touch-action), and a long press shouldn't open Safari's
+     callout or select text. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.overlay { position: absolute; pointer-events: none; color: #c4c9d6; font-size: 14px; }
+.overlay.center { inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; }
+.overlay.info { left: 12px; bottom: 12px; padding: 8px 12px; border-radius: 8px; background: #0d0f14cc; }
+.overlay.error { color: #ff8a9a; }
+.warning { margin-top: 4px; color: #ffd36b; }
+
+/* M4: live tokens */
+.now-playing { background: #12432f; color: #7ef0b5; }
+.overlay.top { top: 12px; left: 50%; transform: translateX(-50%); padding: 6px 14px; border-radius: 999px; background: #0d0f14cc; }
+.toast {
+  position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 5;
+  display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 16px; border-radius: 10px;
+  background: #4a1620; color: #ffd0d8; box-shadow: 0 6px 24px #0008;
+}
+.toast button { min-height: 32px; padding: 0 10px; }
+.token-menu {
+  position: absolute; z-index: 6; display: grid; min-width: 180px; padding: 4px; border-radius: 10px;
+  background: #1c212b; box-shadow: 0 8px 28px #000a; transform: translate(8px, 8px);
+}
+.token-menu button { justify-content: flex-start; text-align: left; background: transparent; color: #e6e8ee; }
+.token-menu button:hover { background: #2a3040; }
+.token-menu .danger { color: #ff8a9a; }
+.modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 16px; background: #000a; }
+.modal { display: grid; gap: 12px; width: min(420px, 100%); padding: 20px; border-radius: 14px; background: #161a22; box-shadow: 0 12px 40px #000c; }
+.modal h3 { margin: 0; }
+.modal p { margin: 0; color: #c4c9d6; }
+.modal label { display: grid; gap: 4px; }
+.modal label.check { display: flex; align-items: center; gap: 8px; }
+.modal select { min-height: 44px; }
